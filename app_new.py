@@ -801,4 +801,5 @@ def cleanup_temp_files(exception=None):
         logger.error(f"Error in cleanup_temp_files: {e}")
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=True)
