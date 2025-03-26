@@ -1,0 +1,166 @@
+body {
+    background-color: #f5f5f5;
+}
+
+.detected-headers, .target-columns {
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.card {
+    border-radius: 10px;
+}
+
+.card-header {
+    border-top-left-radius: 10px;
+    border-top-right-radius: 10px;
+}
+
+.form-control:focus {
+    border-color: #80bdff;
+    box-shadow: 0 0 0 0.2rem rgba(0, 123, 255, 0.25);
+}
+
+.table {
+    font-size: 0.95rem;
+}
+
+#errorMessage {
+    margin-top: 20px;
+}
+
+/* Sample data styling */
+.sample-data {
+    max-height: 100px;
+    overflow-y: auto;
+    font-size: 0.85rem;
+}
+
+.sample-item {
+    padding: 2px 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 200px;
+}
+
+.sample-more {
+    font-style: italic;
+    color: #6c757d;
+    font-size: 0.8rem;
+    margin-top: 2px;
+}
+
+/* Excel preview styling */
+.excel-preview-container {
+    margin-top: 10px;
+}
+
+.excel-grid-container {
+    overflow-x: auto;
+    max-height: 600px;
+    overflow-y: auto;
+    border: 1px solid #dee2e6;
+    position: relative;
+}
+
+.excel-table {
+    margin-bottom: 0;
+    table-layout: fixed;
+    border-collapse: collapse;
+}
+
+.excel-table td {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 150px;
+    font-size: 0.85rem;
+    padding: 4px 8px;
+    border: 1px solid #dee2e6;
+}
+
+.row-number {
+    background-color: #f8f9fa;
+    font-weight: bold;
+    text-align: center;
+    width: 40px;
+    min-width: 40px;
+    max-width: 40px;
+    position: sticky;
+    left: 0;
+    z-index: 1;
+}
+
+/* Excel selection styling */
+.excel-selection-container {
+    overflow-x: auto;
+    max-height: 500px;
+    overflow-y: auto;
+    border: 1px solid #dee2e6;
+    margin-top: 10px;
+    position: relative;
+}
+
+.selection-grid table {
+    border-collapse: collapse;
+}
+
+.selectable-cell {
+    cursor: pointer;
+    position: relative;
+}
+
+.selected-cell {
+    background-color: rgba(0, 123, 255, 0.2) !important;
+    position: relative;
+}
+
+.selected-cell::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    border: 1px solid #007bff;
+    pointer-events: none;
+}
+
+.selection-start {
+    background-color: rgba(0, 123, 255, 0.4) !important;
+}
+
+/* Selection border styling */
+.selection-top {
+    border-top: 2px solid #007bff !important;
+}
+
+.selection-right {
+    border-right: 2px solid #007bff !important;
+}
+
+.selection-bottom {
+    border-bottom: 2px solid #007bff !important;
+}
+
+.selection-left {
+    border-left: 2px solid #007bff !important;
+}
+
+#selectedDataPreview {
+    max-height: 150px;
+    overflow-y: auto;
+    font-size: 0.85rem;
+}
+
+/* Optimize for large datasets */
+.excel-table {
+    will-change: transform;
+    transform: translateZ(0);
+}
+
+/* Improve performance for large tables */
+.excel-grid-container, .excel-selection-container {
+    -webkit-overflow-scrolling: touch;
+}
