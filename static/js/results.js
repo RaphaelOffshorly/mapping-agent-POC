@@ -2,11 +2,25 @@
 const selectedCellsByTarget = {};
 
 document.addEventListener('DOMContentLoaded', function() {
+    // Check if Bootstrap is available
+    console.log("DOM Content Loaded");
+    console.log("Bootstrap available:", typeof bootstrap !== 'undefined');
+    if (typeof bootstrap !== 'undefined') {
+        console.log("Bootstrap version:", bootstrap.Tooltip.VERSION);
+    } else {
+        console.error("Bootstrap JavaScript is not loaded. Modal functionality won't work.");
+    }
+    
     // Form for adding new header
     const addHeaderForm = document.getElementById('addHeaderForm');
     const addHeaderSpinner = document.getElementById('addHeaderSpinner');
     const addHeaderError = document.getElementById('addHeaderError');
     const addHeaderSuccess = document.getElementById('addHeaderSuccess');
+    
+    // CSV preview elements
+    const csvTab = document.getElementById('csv-tab');
+    const csvPreviewContainer = document.getElementById('csvPreviewContainer');
+    const csvLoadingIndicator = document.getElementById('csvLoadingIndicator');
     
     // Re-analyze all button
     const reAnalyzeAllBtn = document.getElementById('reAnalyzeAll');
@@ -25,7 +39,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const revertDataButtons = document.querySelectorAll('.revert-data-btn');
     
     // Store original sample data for revert functionality
-    const originalSampleData = {};
+    let originalSampleData = {};
     
     // Store AI suggested data for export
     const aiSuggestedData = {};
@@ -60,6 +74,92 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // Load initial Excel data when page loads
     loadExcelPreview();
+    
+    // Initialize sample data from the table
+    initializeSampleData();
+    
+// Setup AI Chatbot
+console.log("Setting up AI Chatbot...");
+setupAIChatbot();
+
+// Make generateCsvPreview globally accessible
+window.generateCsvPreview = generateCsvPreview;
+    
+    // Function to initialize sample data from the table
+    function initializeSampleData() {
+        console.log("Initializing sample data...");
+        const rows = document.querySelectorAll('.table-striped tbody tr');
+        
+        rows.forEach(row => {
+            const targetCell = row.querySelector('td:first-child');
+            if (!targetCell) return;
+            
+            const targetColumn = targetCell.textContent.trim();
+            const sampleDataCell = row.querySelector('td:nth-child(5)');
+            
+            if (sampleDataCell) {
+                const sampleItems = Array.from(sampleDataCell.querySelectorAll('.sample-item'))
+                    .map(item => item.textContent.trim());
+                
+                if (sampleItems.length > 0) {
+                    console.log(`Found ${sampleItems.length} sample items for ${targetColumn}`);
+                    originalSampleData[targetColumn] = sampleItems;
+                }
+            }
+        });
+        
+        console.log("Original sample data:", originalSampleData);
+    }
+    
+    // Add event listener for CSV tab to generate preview when clicked
+    if (csvTab) {
+        csvTab.addEventListener('click', function() {
+            console.log("CSV tab clicked, generating preview...");
+            // Hide the load more button when CSV tab is active
+            loadMoreContainer.classList.add('d-none');
+            generateCsvPreview();
+        });
+    }
+    
+    // Add event listener for Excel tab to show load more button if needed
+    document.getElementById('excel-tab').addEventListener('click', function() {
+        // Show load more button if there are more rows
+        if (hasMoreRows) {
+            loadMoreContainer.classList.remove('d-none');
+        }
+    });
+    
+    // Add event listener for radio button changes to update CSV preview
+    document.addEventListener('change', function(e) {
+        if (e.target.classList.contains('data-radio')) {
+            console.log("Radio button selection changed:", e.target.getAttribute('data-target'), e.target.getAttribute('data-source'));
+            
+            // Always regenerate the preview if the CSV tab is active
+            if (document.getElementById('csv-content').classList.contains('active')) {
+                generateCsvPreview();
+            }
+            
+            // Store the selection in aiSuggestedData if it's an AI selection
+            const targetColumn = e.target.getAttribute('data-target');
+            const dataSource = e.target.getAttribute('data-source');
+            
+            if (dataSource === 'ai' && targetColumn) {
+                // Make sure the AI data is stored for this target column
+                if (!aiSuggestedData[targetColumn]) {
+                    // Try to find the AI data from the DOM
+                    const aiDataCell = document.getElementById(`aiCell-${targetColumn.replace(/ /g, '_')}`);
+                    if (aiDataCell) {
+                        const sampleItems = Array.from(aiDataCell.querySelectorAll('.sample-item'))
+                            .map(item => item.textContent.trim());
+                        if (sampleItems.length > 0) {
+                            aiSuggestedData[targetColumn] = sampleItems;
+                            console.log(`Stored AI data for ${targetColumn}:`, sampleItems);
+                        }
+                    }
+                }
+            }
+        }
+    });
     
     // Handle adding a new header
     if (addHeaderForm) {
@@ -671,6 +771,12 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
             }
             
+            // Update the CSV preview if the CSV tab is active
+            if (document.getElementById('csv-content').classList.contains('active')) {
+                console.log("CSV tab is active, regenerating preview after data selection update");
+                generateCsvPreview();
+            }
+            
             // Show success message
             alert('Data selection updated successfully!');
         } else {
@@ -734,7 +840,6 @@ document.addEventListener('DOMContentLoaded', function() {
                     
                     // Clean up
                     window.URL.revokeObjectURL(url);
-                    document.body.removeChild(a);
                 } else {
                     alert(data.error || 'An error occurred while exporting CSV.');
                 }
@@ -1232,6 +1337,157 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
     
+    // Function to generate CSV preview based on current radio button selections
+    function generateCsvPreview() {
+        console.log("Generating CSV preview with completely new implementation");
+        
+        // Show loading indicator
+        csvLoadingIndicator.classList.remove('d-none');
+        
+        // Clear any existing content
+        csvPreviewContainer.innerHTML = '';
+        
+        // Collect radio button selections
+        const exportSelections = {};
+        const dataRadios = document.querySelectorAll('.data-radio:checked');
+        
+        // Process selected radio buttons
+        dataRadios.forEach(radio => {
+            const targetColumn = radio.getAttribute('data-target');
+            const dataSource = radio.getAttribute('data-source');
+            exportSelections[targetColumn] = dataSource;
+        });
+        
+        // Get all target columns from the table
+        const targetColumns = [];
+        const targetCells = document.querySelectorAll('.table-striped tbody tr td:first-child');
+        targetCells.forEach(cell => {
+            targetColumns.push(cell.textContent.trim());
+        });
+        
+        // Always fetch fresh data from the server first, then generate the preview
+        // This ensures we're using the most up-to-date data after AI edits
+        fetch('/get_all_sample_data', {
+            method: 'GET'
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                // Reset local cache and use the server data
+                originalSampleData = {}; // Clear the cached data
+                
+                // Update originalSampleData with complete datasets from server
+                Object.keys(data.sample_data).forEach(targetColumn => {
+                    originalSampleData[targetColumn] = [...data.sample_data[targetColumn]];
+                });
+                
+                console.log("Fetched complete sample data from server:", originalSampleData);
+                
+                // Proceed with preview generation
+                generatePreviewContent(targetColumns, exportSelections);
+            } else {
+                csvPreviewContainer.innerHTML = '<div class="alert alert-danger">Failed to load updated data</div>';
+                csvLoadingIndicator.classList.add('d-none');
+            }
+        })
+        .catch(error => {
+            console.error("Error fetching complete sample data:", error);
+            csvPreviewContainer.innerHTML = '<div class="alert alert-danger">Error loading data: ' + error.message + '</div>';
+            csvLoadingIndicator.classList.add('d-none');
+        });
+    }
+    
+    // New function to handle the preview generation after fetching fresh data
+    function generatePreviewContent(targetColumns, exportSelections) {
+        // Clear any existing content again to ensure we don't have multiple tables
+        csvPreviewContainer.innerHTML = '';
+        
+        // Collect data for each target column based on selection
+        const columnData = {};
+        
+        // Use the updated originalSampleData which was just fetched
+        targetColumns.forEach(targetColumn => {
+            const dataSource = exportSelections[targetColumn] || 'sample'; // Default to sample if not specified
+            
+            if (dataSource === 'ai') {
+                // Use AI suggested data
+                columnData[targetColumn] = aiSuggestedData[targetColumn] || [];
+                console.log(`Using AI data for ${targetColumn}:`, columnData[targetColumn]);
+            } else {
+                // Use sample data from our freshly fetched data
+                if (originalSampleData[targetColumn] && originalSampleData[targetColumn].length > 0) {
+                    columnData[targetColumn] = [...originalSampleData[targetColumn]]; // Use a copy to avoid modifying the original
+                } else {
+                    columnData[targetColumn] = [];
+                }
+                console.log(`Using sample data for ${targetColumn}:`, columnData[targetColumn]);
+            }
+        });
+        
+        // Determine the maximum number of rows
+        let maxRows = 0;
+        Object.values(columnData).forEach(data => {
+            maxRows = Math.max(maxRows, data.length);
+        });
+        
+        // Debug: Log the collected data
+        console.log("CSV Preview - Target Columns:", targetColumns);
+        console.log("CSV Preview - Export Selections:", exportSelections);
+        console.log("CSV Preview - Column Data:", columnData);
+        console.log("CSV Preview - Max Rows:", maxRows);
+        
+        // Create a simple HTML structure for the CSV preview
+        const previewDiv = document.createElement('div');
+        previewDiv.style.overflowX = 'auto';
+        previewDiv.style.maxHeight = '500px';
+        previewDiv.style.overflowY = 'auto';
+        
+        // Create a simple HTML table with basic styling
+        const tableHTML = `
+            <table style="border-collapse: collapse; width: auto; margin-bottom: 0;">
+                <thead>
+                    <tr>
+                        <th style="background-color: #f8f9fa; font-weight: bold; text-align: center; width: 40px; min-width: 40px; max-width: 40px; position: sticky; left: 0; z-index: 1; border: 1px solid #dee2e6; padding: 8px;">#</th>
+                        ${targetColumns.map(column => `
+                            <th style="background-color: #b8daff; color: #000; font-weight: bold; text-align: center; padding: 10px 15px; border: 1px solid #dee2e6; min-width: 150px; max-width: 250px; white-space: normal; word-wrap: break-word;">${column}</th>
+                        `).join('')}
+                    </tr>
+                </thead>
+                <tbody>
+                    ${Array.from({ length: maxRows }, (_, i) => `
+                        <tr>
+                            <td style="background-color: #f8f9fa; font-weight: bold; text-align: center; width: 40px; min-width: 40px; max-width: 40px; position: sticky; left: 0; z-index: 1; border: 1px solid #dee2e6; padding: 8px;">${i + 1}</td>
+                            ${targetColumns.map(column => `
+                                <td style="padding: 6px 10px; border: 1px solid #dee2e6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px;">${i < columnData[column].length ? columnData[column][i] : ''}</td>
+                            `).join('')}
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        `;
+        
+        previewDiv.innerHTML = tableHTML;
+        
+        // Add the preview div to the container
+        csvPreviewContainer.appendChild(previewDiv);
+        
+        // Add a status message
+        const statusText = document.createElement('div');
+        statusText.className = 'text-muted small mt-2';
+        
+        if (maxRows === 0) {
+            statusText.textContent = 'No data available for CSV preview. Please select data for at least one column.';
+            statusText.className = 'alert alert-warning mt-2';
+        } else {
+            statusText.textContent = `CSV preview showing ${targetColumns.length} columns and ${maxRows} rows based on your current selections.`;
+        }
+        
+        csvPreviewContainer.appendChild(statusText);
+        
+        // Hide loading indicator
+        csvLoadingIndicator.classList.add('d-none');
+    }
+    
     // Function to load more Excel rows
     function loadMoreExcelRows() {
         // Show spinner
@@ -1561,5 +1817,560 @@ document.addEventListener('DOMContentLoaded', function() {
             if (reAnalyzeAllBtn) reAnalyzeAllBtn.disabled = false;
             alert('An error occurred: ' + error.message);
         });
+    }
+    
+    // AI Chatbot functionality
+    function setupAIChatbot() {
+        const chatContainer = document.getElementById('aiChatbotModal');
+        const closeButton = document.querySelector('#aiChatbotModal .btn-close');
+        const chatMessages = document.getElementById('chatMessages');
+        const chatInput = document.getElementById('chatInput');
+        const sendMessageButton = document.getElementById('sendMessageButton');
+        const applyChangesButton = document.getElementById('applyChangesButton');
+        
+        if (chatContainer && closeButton && chatMessages && chatInput && sendMessageButton && applyChangesButton) {
+            // Initialize chatbot state
+            const chatbotState = {
+                messages: [],
+                editedCsvData: null,
+                pendingChanges: false,
+                previousState: null  // Add this to store state when awaiting clarification
+            };
+            
+            // Function to get CSV data for editing
+            function captureCsvData() {
+                // Reset chatbot state
+                chatbotState.messages = [];
+                chatbotState.editedCsvData = null;
+                chatbotState.pendingChanges = false;
+                chatbotState.previousState = null; // Clear previous state
+                
+                // Reset UI elements
+                chatInput.placeholder = "Type your message here...";
+                chatInput.classList.remove("clarification-needed");
+                sendMessageButton.innerHTML = '<i class="bi bi-send"></i> Send';
+                
+                // Clear chat messages except the welcome message
+                while (chatMessages.children.length > 1) {
+                    chatMessages.removeChild(chatMessages.lastChild);
+                }
+                
+                // Collect radio button selections to pass the current export state
+                const exportSelections = {};
+                const dataRadios = document.querySelectorAll('.data-radio:checked');
+                dataRadios.forEach(radio => {
+                    const targetColumn = radio.getAttribute('data-target');
+                    const dataSource = radio.getAttribute('data-source');
+                    exportSelections[targetColumn] = dataSource;
+                });
+                
+                // Show thinking indicator
+                showThinkingIndicator();
+                
+                // Get the CSV data for editing
+                fetch('/get_csv_data', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        export_selections: exportSelections
+                    })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    // Hide thinking indicator
+                    hideThinkingIndicator();
+                    
+                    if (data.success) {
+                        chatbotState.editedCsvData = data.csv_data;
+                        
+                // Log the CSV data for debugging
+                if (chatbotState.editedCsvData) {
+                    console.log("CSV data received from server:", chatbotState.editedCsvData);
+                    if (chatbotState.editedCsvData.data && chatbotState.editedCsvData.data.length > 0) {
+                        console.log("First row:", chatbotState.editedCsvData.data[0]);
+                    } else {
+                        console.warn("CSV data is empty or has no rows");
+                    }
+                } else {
+                    console.error("No CSV data received from server");
+                }
+                        
+                        // Add the first AI message about the CSV data
+                        const headerInfo = `The CSV has ${chatbotState.editedCsvData.headers.length} columns: ${chatbotState.editedCsvData.headers.join(', ')}.`;
+                        const rowInfo = `There are ${chatbotState.editedCsvData.data.length} rows of data.`;
+                        
+                        addMessage('ai', `I've loaded the CSV data. ${headerInfo} ${rowInfo} What would you like to edit?`);
+                    } else {
+                        addMessage('ai', `I encountered an error loading the CSV data: ${data.error || 'Unknown error'}`);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error fetching CSV data:', error);
+                    addMessage('ai', 'I encountered an error loading the CSV data. Please try again.');
+                });
+            }
+            
+            // Function to collect export selections from radio buttons
+            function getExportSelections() {
+                const exportSelections = {};
+                const dataRadios = document.querySelectorAll('.data-radio:checked');
+                
+                dataRadios.forEach(radio => {
+                    const targetColumn = radio.getAttribute('data-target');
+                    const dataSource = radio.getAttribute('data-source');
+                    exportSelections[targetColumn] = dataSource;
+                });
+                
+                return exportSelections;
+            }
+            
+// Function to get original Excel data
+function getOriginalExcelData() {
+    // Create a structured object to hold Excel data from the preview
+    const excelData = {};
+    
+    // Get all sheet tabs
+    const sheetTabs = document.querySelectorAll('#excelSheetTabs button');
+    
+    // For each sheet tab, get the corresponding table data
+    sheetTabs.forEach(tab => {
+        const sheetName = tab.getAttribute('data-sheet');
+        const sheetId = tab.getAttribute('data-bs-target').replace('#', '');
+        const sheetContent = document.getElementById(sheetId);
+        
+        if (sheetName && sheetContent) {
+            // Find the table in this sheet
+            const table = sheetContent.querySelector('table');
+            if (table) {
+                // Convert table to a DataFrame-like structure
+                const rows = Array.from(table.querySelectorAll('tbody tr'));
+                const data = [];
+                
+                rows.forEach(row => {
+                    const rowData = Array.from(row.querySelectorAll('td')).slice(1) // Skip row number cell
+                        .map(cell => cell.textContent.trim());
+                    data.push(rowData);
+                });
+                
+                // Store the data for this sheet
+                excelData[sheetName] = {
+                    data: data
+                };
+                
+                console.log(`Captured Excel data for sheet ${sheetName}: ${data.length} rows`);
+            }
+        }
+    });
+    
+    // If we have data, return it
+    if (Object.keys(excelData).length > 0) {
+        console.log("Returning Excel data for source_data:", excelData);
+        return excelData;
+    }
+    
+    console.log("No Excel data found for source_data");
+    return null;
+}
+            
+            // Function to send user message
+            function sendUserMessage() {
+                const message = chatInput.value.trim();
+                
+                if (!message) {
+                    return;
+                }
+                
+                // Add user message to chat
+                addMessage('user', message);
+                
+                // Clear input
+                chatInput.value = '';
+                
+                // Show thinking indicator
+                showThinkingIndicator();
+                
+                // Check if we have a stored state from awaiting clarification
+                const requestBody = {
+                    message: message,
+                    csv_data: chatbotState.editedCsvData,
+                    source_data: getOriginalExcelData()
+                };
+                
+                // If we have a stored state from a previous clarification request, include it
+                if (chatbotState.previousState && chatbotState.previousState.awaiting_clarification) {
+                    requestBody.prev_state = chatbotState.previousState;
+                }
+                
+                // Log the CSV data before sending
+                if (requestBody.csv_data) {
+                    console.log("CSV data before sending:", requestBody.csv_data);
+                    if (requestBody.csv_data.data && requestBody.csv_data.data.length > 0) {
+                        console.log("First row:", requestBody.csv_data.data[0]);
+                    } else {
+                        console.warn("CSV data is empty or has no rows");
+                        
+                        // Ensure we have at least an empty row
+                        if (!requestBody.csv_data.data || requestBody.csv_data.data.length === 0) {
+                            requestBody.csv_data.data = [{}];
+                            
+                            // Add empty values for each header
+                            if (requestBody.csv_data.headers && requestBody.csv_data.headers.length > 0) {
+                                requestBody.csv_data.headers.forEach(header => {
+                                    requestBody.csv_data.data[0][header] = '';
+                                });
+                            }
+                            
+                            console.log("Added empty row to CSV data:", requestBody.csv_data.data);
+                        }
+                    }
+                } else {
+                    console.error("No CSV data to send");
+                }
+                
+                // Send message to backend
+                fetch('/chat_with_csv_editor', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(requestBody)
+                })
+                .then(response => response.json())
+                .then(data => {
+                    // Hide thinking indicator
+                    hideThinkingIndicator();
+                    
+                    if (data.success) {
+                        // Add AI response to chat
+                        addMessage('ai', data.response);
+                        
+                        // Check if the agent is awaiting clarification
+                        if (data.awaiting_clarification && data.state) {
+                            // Store the state for the next request
+                            chatbotState.previousState = data.state;
+                            console.log("Agent is awaiting clarification. State saved for next request.");
+                            
+                            // Update the UI to indicate awaiting clarification
+                            chatInput.placeholder = "Please provide clarification...";
+                            chatInput.classList.add("clarification-needed");
+                            sendMessageButton.innerHTML = '<i class="bi bi-send"></i> Send Clarification';
+                            
+                            // Optional: Add visual cue to the last AI message
+                            const lastMessage = chatMessages.querySelector('.ai-message:last-of-type .message-content');
+                            if (lastMessage) {
+                                lastMessage.classList.add("awaiting-clarification");
+                            }
+                        } else {
+                            // Clear previous state since we're not awaiting clarification anymore
+                            chatbotState.previousState = null;
+                            
+                            // Reset UI elements if they were modified for clarification
+                            chatInput.placeholder = "Type your message here...";
+                            chatInput.classList.remove("clarification-needed");
+                            sendMessageButton.innerHTML = '<i class="bi bi-send"></i> Send';
+                            
+                            // Update CSV data if changed
+                            if (data.csv_data && data.csv_data_changed) {
+                                console.log("CSV data changed, updating state and UI");
+                                chatbotState.editedCsvData = data.csv_data;
+                                chatbotState.pendingChanges = true;
+                                
+                                // Enable apply changes button
+                                applyChangesButton.classList.remove('btn-outline-success');
+                                applyChangesButton.classList.add('btn-success');
+                            }
+                        }
+                    } else {
+                        addMessage('ai', `I encountered an error: ${data.error || 'Unknown error'}`);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error chatting with AI:', error);
+                    // Add more detailed error logging
+                    console.error('Error details:', {
+                        name: error.name,
+                        message: error.message,
+                        stack: error.stack,
+                        response: error.response
+                    });
+                    
+                    // Try to get more information if it's a response error
+                    if (error.response) {
+                        error.response.text().then(text => {
+                            console.error('Response text:', text);
+                            try {
+                                const errorData = JSON.parse(text);
+                                console.error('Parsed error data:', errorData);
+                                addMessage('ai', `Error: ${errorData.error || 'Unknown error'}`);
+                            } catch (e) {
+                                console.error('Could not parse error response:', e);
+                                addMessage('ai', `Error: ${text || 'Unknown error'}`);
+                            }
+                        }).catch(e => {
+                            console.error('Could not get response text:', e);
+                            addMessage('ai', 'I encountered an error processing your request. Please try again.');
+                        });
+                    } else {
+                        hideThinkingIndicator();
+                        addMessage('ai', 'I encountered an error processing your request. Please try again.');
+                    }
+                });
+            }
+            
+            // Wire up event listeners
+            // Send message when the button is clicked
+            sendMessageButton.addEventListener('click', function() {
+                sendUserMessage();
+            });
+            
+            // Send message when Enter key is pressed in the input field
+            chatInput.addEventListener('keypress', function(event) {
+                if (event.key === 'Enter') {
+                    event.preventDefault();
+                    sendUserMessage();
+                }
+            });
+            
+            // Edit with AI button to open modal and capture data
+            const editWithAiButton = document.getElementById('editWithAiButton');
+            if (editWithAiButton) {
+                // Remove any existing onclick attribute
+                editWithAiButton.removeAttribute('onclick');
+                
+                // Add event listener
+                editWithAiButton.addEventListener('click', function() {
+                    // Show the modal
+                    document.getElementById('aiChatbotModal').classList.add('show'); 
+                    document.getElementById('aiChatbotModal').style.display = 'block'; 
+                    document.body.classList.add('modal-open');
+                    
+                    // Add backdrop
+                    var backdrop = document.createElement('div');
+                    backdrop.className = 'modal-backdrop fade show';
+                    document.body.appendChild(backdrop);
+                    
+                    // Capture CSV data
+                    captureCsvData();
+                });
+            }
+            
+            // Add a listener for when the modal is closed using the Close button
+            const aiModalCloseBtn = document.querySelector('#aiChatbotModal .btn-secondary');
+            if (aiModalCloseBtn) {
+                aiModalCloseBtn.addEventListener('click', function() {
+                    // Update the CSV preview after closing the modal
+                    generateCsvPreview();
+                });
+            }
+            
+            // Apply changes button
+            applyChangesButton.addEventListener('click', function() {
+                if (!chatbotState.pendingChanges) {
+                    return;
+                }
+                
+                // Show thinking indicator
+                showThinkingIndicator();
+                
+                // Send edited CSV data to backend
+                fetch('/update_csv_preview', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        csv_data: chatbotState.editedCsvData
+                    })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    // Hide thinking indicator
+                    hideThinkingIndicator();
+                    
+                    if (data.success) {
+                        // Add success message
+                        addMessage('ai', 'I\'ve applied the changes to the CSV preview. You can continue editing or close this dialog to see the updated preview.');
+                        
+                        // Reset pendingChanges flag
+                        chatbotState.pendingChanges = false;
+                        
+                        // Force refresh of all data and UI
+                        originalSampleData = {}; // Clear the cached data
+
+                        // Update the CSV preview first
+                        if (typeof generateCsvPreview === 'function') {
+                            generateCsvPreview();
+                        }
+                        
+                        // Force refresh the target columns display by fetching new data
+                        fetch('/get_all_sample_data')
+                            .then(response => response.json())
+                            .then(freshData => {
+                                if (freshData.success) {
+                                    console.log("Fresh data fetched after CSV edit:", freshData);
+                                    
+                                    // Check for any new columns added by the chatbot
+                                    const currentColumns = document.querySelectorAll('.table-striped tbody tr td:first-child');
+                                    const existingColumnNames = Array.from(currentColumns).map(col => col.textContent.trim());
+                                    const newColumns = Object.keys(freshData.sample_data).filter(col => !existingColumnNames.includes(col));
+                                    
+                                    if (newColumns.length > 0) {
+                                        console.log("New columns detected:", newColumns);
+                                        // This requires a page refresh to properly update the UI with new columns
+                                        alert("New columns have been added to your data. The page will refresh to show the updated table.");
+                                        window.location.reload();
+                                    }
+                                }
+                            })
+                            .catch(error => {
+                                console.error("Error refreshing data:", error);
+                            });
+                        
+                        // Reset button style
+                        applyChangesButton.classList.remove('btn-success');
+                        applyChangesButton.classList.add('btn-outline-success');
+                    } else {
+                        addMessage('ai', `I encountered an error applying the changes: ${data.error || 'Unknown error'}`);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error applying changes:', error);
+                    hideThinkingIndicator();
+                    addMessage('ai', 'I encountered an error applying the changes. Please try again.');
+                });
+            });
+            
+            // Function to add a message to the chat
+            function addMessage(sender, text) {
+                // Create message container
+                const messageDiv = document.createElement('div');
+                messageDiv.className = `message ${sender}-message`;
+                
+                // Create message content
+                const contentDiv = document.createElement('div');
+                contentDiv.className = 'message-content';
+                contentDiv.textContent = text;
+                
+                // Create message timestamp
+                const timeSpan = document.createElement('span');
+                timeSpan.className = 'message-time';
+                timeSpan.textContent = new Date().toLocaleTimeString();
+                
+                // Assemble message
+                messageDiv.appendChild(contentDiv);
+                messageDiv.appendChild(timeSpan);
+                
+                // Add to chat
+                chatMessages.appendChild(messageDiv);
+                
+                // Scroll to bottom
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+                
+                // Add to state
+                chatbotState.messages.push({
+                    role: sender === 'user' ? 'user' : 'assistant',
+                    content: text
+                });
+            }
+            
+            // Function to show thinking indicator
+            function showThinkingIndicator() {
+                // Remove any existing thinking indicators
+                hideThinkingIndicator();
+                
+                // Create thinking container
+                const thinkingDiv = document.createElement('div');
+                thinkingDiv.className = 'message ai-message';
+                thinkingDiv.id = 'thinkingIndicator';
+                
+                // Create thinking content
+                const contentDiv = document.createElement('div');
+                contentDiv.className = 'thinking';
+                
+                // Create thinking dots
+                for (let i = 0; i < 3; i++) {
+                    const dot = document.createElement('span');
+                    dot.className = 'thinking-dot';
+                    contentDiv.appendChild(dot);
+                }
+                
+                // Assemble thinking indicator
+                thinkingDiv.appendChild(contentDiv);
+                
+                // Add to chat
+                chatMessages.appendChild(thinkingDiv);
+                
+                // Scroll to bottom
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+            }
+            
+            // Function to hide thinking indicator
+            function hideThinkingIndicator() {
+                const thinkingIndicator = document.getElementById('thinkingIndicator');
+                if (thinkingIndicator) {
+                    thinkingIndicator.remove();
+                }
+            }
+            
+            // Function to close the modal and refresh CSV preview
+            function closeModal() {
+                // Hide the modal
+                document.getElementById('aiChatbotModal').classList.remove('show');
+                document.getElementById('aiChatbotModal').style.display = 'none';
+                document.body.classList.remove('modal-open');
+                
+                // Remove backdrop
+                var backdrop = document.querySelector('.modal-backdrop');
+                if (backdrop) backdrop.remove();
+                
+                // Clear the cached data to force a fresh fetch
+                originalSampleData = {}; // This is now safe since we changed it to let
+                
+                // Check if we need to update the UI due to new columns
+                fetch('/get_all_sample_data')
+                    .then(response => response.json())
+                    .then(freshData => {
+                        if (freshData.success) {
+                            // Check for any new columns added by the chatbot
+                            const currentColumns = document.querySelectorAll('.table-striped tbody tr td:first-child');
+                            const existingColumnNames = Array.from(currentColumns).map(col => col.textContent.trim());
+                            const newColumns = Object.keys(freshData.sample_data).filter(col => !existingColumnNames.includes(col));
+                            
+                            if (newColumns.length > 0) {
+                                console.log("New columns detected after modal close:", newColumns);
+                                // This requires a page refresh to properly update the UI with new columns
+                                alert("New columns have been added to your data. The page will refresh to show the updated table.");
+                                window.location.reload();
+                                return;
+                            }
+                        }
+                        
+                        // If no new columns, just regenerate the CSV preview
+                        generateCsvPreview();
+                    })
+                    .catch(error => {
+                        console.error("Error checking for new columns:", error);
+                        // Fall back to just regenerating the CSV preview
+                        generateCsvPreview();
+                    });
+            }
+            
+            // Wire up the close button properly
+            if (closeButton) {
+                // Remove any existing onclick attribute
+                closeButton.removeAttribute('onclick');
+                closeButton.addEventListener('click', closeModal);
+            }
+            
+            // Also wire up the close button in the footer
+            const modalCloseBtn = document.querySelector('#aiChatbotModal .modal-footer .btn-secondary');
+            if (modalCloseBtn) {
+                modalCloseBtn.addEventListener('click', closeModal);
+            }
+        } else {
+            console.error("Chat UI elements not found in the DOM");
+        }
     }
 });

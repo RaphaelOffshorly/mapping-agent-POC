@@ -9,6 +9,8 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
     <!-- Add SheetJS for Excel handling -->
     <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <!-- Add Bootstrap JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </head>
 <body>
     <div class="container my-5">
@@ -239,16 +241,60 @@
                                 </div>
                                 <div class="card-body">
                                     <div class="excel-preview-container">
-                                        <!-- Sheet tabs will be populated by JavaScript -->
-                                        <ul class="nav nav-tabs" id="excelSheetTabs" role="tablist"></ul>
+                                        <!-- Main tabs for Excel and CSV -->
+                                        <ul class="nav nav-tabs" id="previewTypeTabs" role="tablist">
+                                            <li class="nav-item" role="presentation">
+                                                <button class="nav-link active" id="excel-tab" data-bs-toggle="tab" data-bs-target="#excel-content" 
+                                                        type="button" role="tab" aria-controls="excel-content" aria-selected="true">
+                                                    Excel Sheets
+                                                </button>
+                                            </li>
+                                            <li class="nav-item" role="presentation">
+                                                <button class="nav-link" id="csv-tab" data-bs-toggle="tab" data-bs-target="#csv-content" 
+                                                        type="button" role="tab" aria-controls="csv-content" aria-selected="false">
+                                                    CSV Export Preview
+                                                </button>
+                                            </li>
+                                        </ul>
                                         
-                                        <!-- Sheet content will be populated by JavaScript -->
-                                        <div class="tab-content mt-2" id="excelSheetContent">
-                                            <div class="text-center py-5" id="excelLoadingIndicator">
-                                                <div class="spinner-border text-primary" role="status">
-                                                    <span class="visually-hidden">Loading...</span>
+                                        <!-- Tab content for Excel and CSV -->
+                                        <div class="tab-content" id="previewTypeContent">
+                                            <!-- Excel content tab -->
+                                            <div class="tab-pane fade show active" id="excel-content" role="tabpanel" aria-labelledby="excel-tab">
+                                                <!-- Sheet tabs will be populated by JavaScript -->
+                                                <ul class="nav nav-tabs mt-3" id="excelSheetTabs" role="tablist"></ul>
+                                                
+                                                <!-- Sheet content will be populated by JavaScript -->
+                                                <div class="tab-content mt-2" id="excelSheetContent">
+                                                    <div class="text-center py-5" id="excelLoadingIndicator">
+                                                        <div class="spinner-border text-primary" role="status">
+                                                            <span class="visually-hidden">Loading...</span>
+                                                        </div>
+                                                        <p class="mt-2">Loading Excel data...</p>
+                                                    </div>
                                                 </div>
-                                                <p class="mt-2">Loading Excel data...</p>
+                                            </div>
+                                            
+                                            <!-- CSV content tab -->
+                                            <div class="tab-pane fade" id="csv-content" role="tabpanel" aria-labelledby="csv-tab">
+                                                <div class="mt-3">
+                                                    <div class="alert alert-info">
+                                                        <i class="bi bi-info-circle"></i> This preview shows how the CSV will be exported based on your current selections.
+                                                    </div>
+                                                    <div class="d-flex justify-content-end mb-2">
+                                                        <button class="btn btn-primary" id="editWithAiButton">
+                                                            <i class="bi bi-robot"></i> Edit using AI
+                                                        </button>
+                                                    </div>
+                                                    <div id="csvPreviewContainer" class="excel-grid-container">
+                                                        <div class="text-center py-5" id="csvLoadingIndicator">
+                                                            <div class="spinner-border text-primary" role="status">
+                                                                <span class="visually-hidden">Loading...</span>
+                                                            </div>
+                                                            <p class="mt-2">Generating CSV preview...</p>
+                                                        </div>
+                                                    </div>
+                                                </div>
                                             </div>
                                         </div>
                                         
@@ -328,6 +374,52 @@
                                     </div>
                                 </div>
                             </div>
+                            
+                            <!-- AI Chatbot Modal -->
+                            <div class="modal fade" id="aiChatbotModal" tabindex="-1" aria-labelledby="aiChatbotModalLabel" aria-hidden="true">
+                                <div class="modal-dialog modal-lg">
+                                    <div class="modal-content">
+                                        <div class="modal-header">
+                                            <h5 class="modal-title" id="aiChatbotModalLabel">
+                                                <i class="bi bi-robot"></i> AI CSV Editor
+                                            </h5>
+                                                            <button type="button" class="btn-close" aria-label="Close"></button>
+                                        </div>
+                                        <div class="modal-body">
+                                            <div class="alert alert-info">
+                                                <i class="bi bi-info-circle"></i> You can ask the AI to edit the CSV data. Try commands like:
+                                                <ul class="mb-0 mt-1">
+                                                    <li>Insert a new row with data</li>
+                                                    <li>Delete row 3</li>
+                                                    <li>Update cell at row a, column b to "new value"</li>
+                                                    <li>Populate column X with data from Excel coordinates B7-B10</li>
+                                                </ul>
+                                            </div>
+                                            
+                                            <!-- Chat messages container -->
+                                            <div id="chatMessages" class="chat-messages mb-3 border rounded p-3" style="height: 300px; overflow-y: auto;">
+                                                <div class="message ai-message">
+                                                    <div class="message-content">
+                                                        Hello! I'm your AI assistant for editing CSV data. How can I help you modify this CSV file?
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            
+                                            <!-- Chat input -->
+                                            <div class="input-group">
+                                                <input type="text" id="chatInput" class="form-control" placeholder="Type your message here..." aria-label="Chat message">
+                                                <button class="btn btn-primary" type="button" id="sendMessageButton">
+                                                    <i class="bi bi-send"></i> Send
+                                                </button>
+                                            </div>
+                                        </div>
+                                        <div class="modal-footer">
+                                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                                            <button type="button" class="btn btn-success" id="applyChangesButton">Apply Changes</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
                         {% endif %}
                     </div>
                 </div>
@@ -337,6 +429,106 @@
 
     <!-- Add results.js script reference -->
     <script src="{{ url_for('static', filename='js/results.js') }}"></script>
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    
+    <style>
+        /* Chat styling */
+        .chat-messages {
+            background-color: #f8f9fa;
+        }
+        
+        .message {
+            margin-bottom: 12px;
+            max-width: 85%;
+            clear: both;
+        }
+        
+        .user-message {
+            float: right;
+        }
+        
+        .ai-message {
+            float: left;
+        }
+        
+        .message-content {
+            padding: 8px 12px;
+            border-radius: 15px;
+            display: inline-block;
+            word-break: break-word;
+        }
+        
+        .user-message .message-content {
+            background-color: #007bff;
+            color: white;
+            border-top-right-radius: 4px;
+        }
+        
+        .ai-message .message-content {
+            background-color: #e9ecef;
+            color: #212529;
+            border-top-left-radius: 4px;
+        }
+        
+        /* Styles for awaiting clarification state */
+        .awaiting-clarification {
+            border-left: 3px solid #ffc107;
+            animation: pulseBorder 2s infinite;
+        }
+        
+        input.clarification-needed {
+            border-color: #ffc107;
+            box-shadow: 0 0 0 0.25rem rgba(255, 193, 7, 0.25);
+        }
+        
+        @keyframes pulseBorder {
+            0% { border-left-color: #ffc107; }
+            50% { border-left-color: #fd7e14; }
+            100% { border-left-color: #ffc107; }
+        }
+        
+        .message-time {
+            font-size: 0.75rem;
+            color: #6c757d;
+            margin-top: 4px;
+            display: block;
+        }
+        
+        .thinking {
+            display: flex;
+            padding: 8px 12px;
+            background-color: #e9ecef;
+            color: #6c757d;
+            border-radius: 15px;
+            border-top-left-radius: 4px;
+            max-width: 60px;
+        }
+        
+        .thinking-dot {
+            animation: thinking 1.4s infinite ease-in-out both;
+            background-color: #6c757d;
+            border-radius: 50%;
+            display: inline-block;
+            height: 8px;
+            margin-right: 4px;
+            width: 8px;
+        }
+        
+        .thinking-dot:nth-child(1) {
+            animation-delay: -0.32s;
+        }
+        
+        .thinking-dot:nth-child(2) {
+            animation-delay: -0.16s;
+        }
+        
+        @keyframes thinking {
+            0%, 80%, 100% {
+                transform: scale(0);
+            }
+            40% {
+                transform: scale(1);
+            }
+        }
+    </style>
 </body>
 </html>

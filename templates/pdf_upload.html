@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Data Extractor</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+</head>
+<body>
+    <div class="container my-5">
+        <div class="row justify-content-center">
+            <div class="col-lg-8">
+                <div class="card shadow">
+                    <div class="card-header bg-primary text-white">
+                        <h2 class="card-title mb-0">PDF Data Extractor</h2>
+                        <div class="mt-2">
+                            <button type="button" class="btn btn-outline-light" id="excelModeBtn">Excel Mode</button>
+                            <button type="button" class="btn btn-light" id="pdfModeBtn" disabled>PDF Mode</button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div id="step1Container">
+                            <h4>Step 1: Upload Excel Template for Schema Generation</h4>
+                            <p>Upload an Excel file to generate a schema for PDF extraction.</p>
+                            
+                            <form id="schemaForm" enctype="multipart/form-data">
+                                <div class="mb-4">
+                                    <label for="excelFile" class="form-label">Excel Template (.xlsx, .xls)</label>
+                                    <input type="file" class="form-control" id="excelFile" name="excel_file" accept=".xlsx,.xls,.csv" required>
+                                    <div id="excelSheetSelectionContainer" class="mt-2 d-none">
+                                        <label for="excelSheetSelect" class="form-label">Select Sheet</label>
+                                        <select class="form-select" id="excelSheetSelect" name="excel_sheet_name">
+                                            <option value="">Loading sheets...</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                
+                                <div class="mb-3">
+                                    <button type="submit" class="btn btn-primary" id="generateSchemaBtn">
+                                        <span class="spinner-border spinner-border-sm d-none" role="status" aria-hidden="true" id="schemaSpinner"></span>
+                                        Generate Schema
+                                    </button>
+                                </div>
+                            </form>
+                        </div>
+                        
+                        <div id="step2Container" class="d-none">
+                            <h4>Step 2: Review and Edit Schema</h4>
+                            <p>Review the generated schema and make any necessary edits.</p>
+                            
+                            <div class="mb-4">
+                                <label for="schemaEditor" class="form-label">Schema JSON</label>
+                                <textarea class="form-control" id="schemaEditor" rows="15" style="font-family: monospace;"></textarea>
+                            </div>
+                            
+                            <div class="mb-3">
+                                <button type="button" class="btn btn-primary" id="saveSchemaBtn">
+                                    Save Schema and Continue
+                                </button>
+                            </div>
+                        </div>
+                        
+                        <div id="step3Container" class="d-none">
+                            <h4>Step 3: Upload PDF for Data Extraction</h4>
+                            <p>Upload a PDF file to extract data using the generated schema.</p>
+                            
+                            <form id="pdfForm" enctype="multipart/form-data">
+                                <div class="mb-4">
+                                    <label for="pdfFile" class="form-label">PDF File (.pdf)</label>
+                                    <input type="file" class="form-control" id="pdfFile" name="pdf_file" accept=".pdf" required>
+                                </div>
+                                
+                                <div class="mb-3">
+                                    <button type="submit" class="btn btn-primary" id="extractDataBtn">
+                                        <span class="spinner-border spinner-border-sm d-none" role="status" aria-hidden="true" id="pdfSpinner"></span>
+                                        Extract Data
+                                    </button>
+                                </div>
+                            </form>
+                        </div>
+                        
+                        <div class="alert alert-danger d-none" id="errorMessage"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="{{ url_for('static', filename='js/pdf_upload.js') }}"></script>
+</body>
+</html>

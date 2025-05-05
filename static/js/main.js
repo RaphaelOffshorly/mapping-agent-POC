@@ -7,6 +7,12 @@ document.addEventListener('DOMContentLoaded', function() {
     const sheetSelectionContainer = document.getElementById('sheetSelectionContainer');
     const sheetSelect = document.getElementById('sheetSelect');
     const targetColumnsTextarea = document.getElementById('targetColumns');
+    const pdfModeBtn = document.getElementById('pdfModeBtn');
+    
+    // Mode switching
+    pdfModeBtn.addEventListener('click', function() {
+        window.location.href = '/pdf_upload';
+    });
     
     // Add a file input for target columns
     const targetFileWrapper = document.createElement('div');
