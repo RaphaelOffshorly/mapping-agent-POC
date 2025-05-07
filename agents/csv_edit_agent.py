@@ -1,4 +1,6 @@
 import logging
+import os
+import pandas as pd
 from typing import Dict, Any, TypedDict, Annotated, List
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_anthropic import ChatAnthropic
@@ -114,8 +116,33 @@ When you respond always provide the complete function definition as a string arg
             content=f"User request: {user_request}\nCSV file path: {csv_file_path}"
         )
         
-        # Prepend system and context messages to ensure the agent has the CSV file path
-        messages = [HumanMessage(content=formatted_system_message, name="system"), context_message] + messages
+        # Load the CSV file to get its structure first
+        try:
+            import pandas as pd
+            if os.path.exists(csv_file_path):
+                df = pd.read_csv(csv_file_path)
+                df_info = {
+                    "columns": list(df.columns),
+                    "shape": df.shape,
+                    "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
+                    "sample": df.head(3).to_dict('records') if not df.empty else {}
+                }
+                df_info_str = f"CSV Structure:\nColumns: {df_info['columns']}\nShape: {df_info['shape']}\nSample data: {df_info['sample']}"
+                logger.info(f"Loaded CSV structure: {df_info_str[:200]}...")
+            else:
+                df_info_str = "CSV file not found."
+                logger.warning(f"CSV file not found: {csv_file_path}")
+        except Exception as e:
+            df_info_str = f"Error loading CSV: {str(e)}"
+            logger.error(f"Error loading CSV structure: {e}")
+        
+        # Add DataFrame structure information to the context message
+        enhanced_context_message = HumanMessage(
+            content=f"User request: {user_request}\nCSV file path: {csv_file_path}\n\n{df_info_str}"
+        )
+        
+        # Prepend system and context messages to ensure the agent has the CSV file path and structure
+        messages = [HumanMessage(content=formatted_system_message, name="system"), enhanced_context_message] + messages
 
         # Add an updated instruction to ensure the agent knows to perform explicit verification
         enhanced_messages = messages + [

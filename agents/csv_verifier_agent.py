@@ -1,4 +1,6 @@
 import logging
+import os
+import pandas as pd
 from typing import Dict, Any, TypedDict, Annotated, List, Literal
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_anthropic import ChatAnthropic
@@ -102,12 +104,32 @@ csv_pandas_eval: Execute Python code to verify CSV data. Create a function 'veri
             logger.info(f"[Verifier] CSV file path: {csv_file_path}")
             logger.info(f"[Verifier] Messages so far: {[m.content if hasattr(m, 'content') else str(m) for m in messages]}")
 
-        # If this is the first step, prepend system/context messages
-        if not messages:
-            context_message = HumanMessage(
-                content=f"User request: {user_request}\nCSV file path: {csv_file_path}"
-            )
-            messages = [HumanMessage(content=system_message, name="system"), context_message]
+            # If this is the first step, prepend system/context messages
+            if not messages:
+                # Load the CSV file to get its structure first
+                try:
+                    if os.path.exists(csv_file_path):
+                        df = pd.read_csv(csv_file_path)
+                        df_info = {
+                            "columns": list(df.columns),
+                            "shape": df.shape,
+                            "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
+                            "sample": df.head(3).to_dict('records') if not df.empty else {}
+                        }
+                        df_info_str = f"CSV Structure:\nColumns: {df_info['columns']}\nShape: {df_info['shape']}\nSample data: {df_info['sample']}"
+                        logger.info(f"Loaded CSV structure: {df_info_str[:200]}...")
+                    else:
+                        df_info_str = "CSV file not found."
+                        logger.warning(f"CSV file not found: {csv_file_path}")
+                except Exception as e:
+                    df_info_str = f"Error loading CSV: {str(e)}"
+                    logger.error(f"Error loading CSV structure: {e}")
+                
+                # Add DataFrame structure information to the context message
+                context_message = HumanMessage(
+                    content=f"User request: {user_request}\nCSV file path: {csv_file_path}\n\n{df_info_str}"
+                )
+                messages = [HumanMessage(content=system_message, name="system"), context_message]
             
             # Immediately add the forced JSON verdict reminder
             force_json_message = HumanMessage(
