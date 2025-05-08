@@ -597,6 +597,18 @@ def csv_pandas_eval(
                 "int": int,
                 "float": float,
                 "bool": bool,
+                "set": set,
+                "tuple": tuple,
+                "zip": zip,
+                "enumerate": enumerate,
+                "map": map,
+                "filter": filter,
+                "sorted": sorted,
+                "reversed": reversed,
+                "math": __import__('math'),  # Allow math module
+                "re": __import__('re'),      # Allow regex module
+                "datetime": __import__('datetime'),  # Allow datetime module
+                "json": __import__('json'),  # Allow JSON module
                 "print": print,  # Allow print for debugging
                 "all": all,      # Add all() function
                 "any": any,      # Add any() function
@@ -817,6 +829,18 @@ def csv_pandas_edit(
                 "int": int,
                 "float": float,
                 "bool": bool,
+                "set": set,
+                "tuple": tuple,
+                "zip": zip,
+                "enumerate": enumerate,
+                "map": map,
+                "filter": filter,
+                "sorted": sorted,
+                "reversed": reversed,
+                "math": __import__('math'),  # Allow math module
+                "re": __import__('re'),      # Allow regex module
+                "datetime": __import__('datetime'),  # Allow datetime module
+                "json": __import__('json'),  # Allow JSON module
                 "print": print,  # Allow print for debugging
                 "all": all,      # Add all() function
                 "any": any,      # Add any() function

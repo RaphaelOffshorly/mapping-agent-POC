@@ -2046,18 +2046,25 @@ function getOriginalExcelData() {
                         // Add AI response to chat
                         addMessage('ai', data.response);
                         
-                        // Check if the agent is awaiting clarification
-                        if (data.awaiting_clarification && data.state) {
-                            // Store the state for the next request
-                            chatbotState.previousState = data.state;
-                            console.log("Agent is awaiting clarification. State saved for next request.");
+                        // Check if the agent is waiting for clarification
+                        if (data.needs_clarification) {
+                            console.log("Agent needs clarification:", data.clarification_request);
+                            
+                            // Store the current state
+                            chatbotState.previousState = {
+                                awaiting_clarification: true,
+                                csv_data: chatbotState.editedCsvData
+                            };
+                            
+                            // Show the clarification request as an AI message
+                            addMessage('ai', data.clarification_request || "I need your clarification on this request.");
                             
                             // Update the UI to indicate awaiting clarification
                             chatInput.placeholder = "Please provide clarification...";
                             chatInput.classList.add("clarification-needed");
                             sendMessageButton.innerHTML = '<i class="bi bi-send"></i> Send Clarification';
                             
-                            // Optional: Add visual cue to the last AI message
+                            // Add visual cue to the last AI message
                             const lastMessage = chatMessages.querySelector('.ai-message:last-of-type .message-content');
                             if (lastMessage) {
                                 lastMessage.classList.add("awaiting-clarification");
@@ -2211,15 +2218,29 @@ function getOriginalExcelData() {
                                 if (freshData.success) {
                                     console.log("Fresh data fetched after CSV edit:", freshData);
                                     
-                                    // Check for any new columns added by the chatbot
+                                    // Get current column names from the DOM
                                     const currentColumns = document.querySelectorAll('.table-striped tbody tr td:first-child');
                                     const existingColumnNames = Array.from(currentColumns).map(col => col.textContent.trim());
-                                    const newColumns = Object.keys(freshData.sample_data).filter(col => !existingColumnNames.includes(col));
                                     
-                                    if (newColumns.length > 0) {
-                                        console.log("New columns detected:", newColumns);
-                                        // This requires a page refresh to properly update the UI with new columns
-                                        alert("New columns have been added to your data. The page will refresh to show the updated table.");
+                                    // Get new column names from the server response
+                                    const serverColumnNames = Object.keys(freshData.sample_data);
+                                    
+                                    // Check for columns added or removed
+                                    const newColumns = serverColumnNames.filter(col => !existingColumnNames.includes(col));
+                                    const deletedColumns = existingColumnNames.filter(col => !serverColumnNames.includes(col));
+                                    
+                                    // Check if any column data has been significantly modified
+                                    let dataModified = false;
+                                    const commonColumns = serverColumnNames.filter(col => existingColumnNames.includes(col));
+                                    
+                                    // Log changes for debugging
+                                    if (newColumns.length > 0) console.log("New columns detected:", newColumns);
+                                    if (deletedColumns.length > 0) console.log("Deleted columns detected:", deletedColumns);
+                                    
+                                    // If structure has changed or significant data changes, reload the page
+                                    if (newColumns.length > 0 || deletedColumns.length > 0) {
+                                        console.log("Column structure changed. Triggering page refresh.");
+                                        alert("The column structure of your data has changed. The page will refresh to show the updated table.");
                                         window.location.reload();
                                     }
                                 }

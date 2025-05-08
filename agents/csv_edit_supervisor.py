@@ -1,6 +1,7 @@
 import logging
 from typing import Dict, Any, Literal, TypedDict, Annotated, List, Union
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+from agents.csv_verifier_agent import CSVVerifierAgent, VerifierOutput
 from langchain_anthropic import ChatAnthropic
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import Command
@@ -60,20 +61,52 @@ def create_csv_edit_supervisor_agent(verbose=False):
         if verbose:
             logger.info(f"[Supervisor] Entering supervisor_node with state: {state}")
         
-        # Check for verification FAILED messages and route to csv_edit
+        # Check for verification result messages from verifier agent
         for msg in reversed(state["messages"]):
             if hasattr(msg, 'name') and msg.name == "csv_verifier" and hasattr(msg, 'content'):
-                if "FAIL" in msg.content.upper() or "fail" in msg.content.lower():
+                content = msg.content
+                
+                # First try to extract JSON from the message if present
+                try:
+                    import json
+                    json_content = None
+                    
+                    # Try to extract JSON from the message content
+                    if '```json' in content and '```' in content:
+                        json_start = content.find('```json') + 7
+                        json_end = content.find('```', json_start)
+                        if json_end > json_start:
+                            json_content = content[json_start:json_end].strip()
+                    elif '{' in content and '}' in content:
+                        json_start = content.find('{')
+                        json_end = content.rfind('}') + 1
+                        if json_end > json_start:
+                            json_content = content[json_start:json_end]
+                    
+                    if json_content:
+                        verdict_data = json.loads(json_content)
+                        if 'verdict' in verdict_data:
+                            if verdict_data['verdict'] == "PASS":
+                                if verbose:
+                                    logger.info("[Supervisor] Found verification PASS verdict in JSON, ending workflow")
+                                return Command(goto=END, update={"next": END})
+                            elif verdict_data['verdict'] == "FAILED" or verdict_data['verdict'] == "FAIL":
+                                if verbose:
+                                    logger.info("[Supervisor] Found verification FAIL verdict in JSON, sending to csv_edit")
+                                state["verification_failure"] = verdict_data.get('reason', content)
+                                return Command(goto="csv_edit", update={"next": "csv_edit"})
+                except (json.JSONDecodeError, ValueError, KeyError, IndexError):
+                    # Not JSON or couldn't parse, fall back to string-based checks
+                    pass
+                
+                # Fall back to simple string-based checks (for backward compatibility)
+                if "FAIL" in content.upper() or "fail" in content.lower():
                     if verbose:
                         logger.info("[Supervisor] Found verification FAIL message, sending to csv_edit")
                     # Store the failure reason
-                    state["verification_failure"] = msg.content
+                    state["verification_failure"] = content
                     return Command(goto="csv_edit", update={"next": "csv_edit"})
-        
-        # Check if the last message is a verification pass message
-        for msg in reversed(state["messages"]):
-            if hasattr(msg, 'name') and msg.name == "csv_verifier" and hasattr(msg, 'content'):
-                if "PASS" in msg.content.upper() or "pass" in msg.content.lower():
+                elif "PASS" in content.upper() or "pass" in content.lower():
                     if verbose:
                         logger.info("[Supervisor] Found verification PASS message, ending workflow")
                     return Command(goto=END, update={"next": END})
@@ -232,7 +265,6 @@ def create_csv_edit_supervisor_agent(verbose=False):
         )
 
     # Verifier node: uses CSVVerifierAgent to dynamically check the CSV based on user request
-    from agents.csv_verifier_agent import CSVVerifierAgent
     def csv_verifier_node(state: SupervisorState) -> Command[Literal["supervisor", "__end__"]]:
         try:
             if verbose:
@@ -255,24 +287,31 @@ def create_csv_edit_supervisor_agent(verbose=False):
             if verbose:
                 logger.info(f"[Supervisor] csv_verifier_node result: {result}")
             
-            # Find the last message from the verifier agent
-            verifier_messages = result.get("messages", [])
-            last_msg = verifier_messages[-1] if verifier_messages else None
-
-            # Check all messages for a "PASS" or "FAIL" response (either uppercase or lowercase)
+            # Get the final verdict directly from the verifier agent result
             decision = None
-            verdict_message = None
+            reason = "Verification complete."
+            verdict_data = result.get("final_verdict", None)
             
-            # First pass: Look for explicit verdicts or structured JSON output
-            for msg in reversed(verifier_messages):
-                if hasattr(msg, 'content') and isinstance(msg.content, str):
-                    content = msg.content.strip()
+            if verdict_data and isinstance(verdict_data, dict) and "verdict" in verdict_data:
+                # Use the structured JSON verdict
+                if verdict_data["verdict"] == "PASS":
+                    decision = "pass"
+                    reason = verdict_data.get("reason", "The edit matches the core intent of the user request.")
+                elif verdict_data["verdict"] == "FAILED" or verdict_data["verdict"] == "FAIL":
+                    decision = "fail"
+                    reason = verdict_data.get("reason", "The edit does not match the user request.")
+                # If IN_PROGRESS, we'll fall back to looking at the last message
+            
+            # If no structured verdict was found, look at the last message as fallback
+            if not decision and result.get("messages"):
+                last_msg = result["messages"][-1]
+                if hasattr(last_msg, 'content') and isinstance(last_msg.content, str):
+                    content = last_msg.content
                     
-                    # Try to parse JSON verdict first (new structured output format)
+                    # Try to extract JSON from the content
                     try:
                         import json
-                        # Check for JSON content (either directly or in code blocks)
-                        json_content = content
+                        json_content = None
                         
                         # Handle code blocks with ```json``` format
                         if '```json' in content and '```' in content:
@@ -280,7 +319,6 @@ def create_csv_edit_supervisor_agent(verbose=False):
                             json_end = content.find('```', json_start)
                             if json_end > json_start:
                                 json_content = content[json_start:json_end].strip()
-                        
                         # Handle JSON directly in the content
                         elif '{' in content and '}' in content:
                             json_start = content.find('{')
@@ -288,83 +326,36 @@ def create_csv_edit_supervisor_agent(verbose=False):
                             if json_end > json_start:
                                 json_content = content[json_start:json_end]
                                 
-                        # Try to parse the JSON content
-                        verdict_data = json.loads(json_content)
-                        if 'verdict' in verdict_data:
-                            if verdict_data['verdict'] == "PASS":
-                                decision = "pass"
-                                verdict_message = msg
-                                break
-                            elif verdict_data['verdict'] == "FAILED" or verdict_data['verdict'] == "FAIL":
-                                decision = "fail"
-                                verdict_message = msg
-                                break
-                            elif verdict_data['verdict'] == "IN_PROGRESS":
-                                # Still processing, will let other checks decide
-                                pass
+                        if json_content:
+                            parsed_verdict = json.loads(json_content)
+                            if 'verdict' in parsed_verdict:
+                                if parsed_verdict['verdict'] == "PASS":
+                                    decision = "pass"
+                                    reason = parsed_verdict.get("reason", "The edit matches the core intent of the user request.")
+                                elif parsed_verdict['verdict'] == "FAILED" or parsed_verdict['verdict'] == "FAIL":
+                                    decision = "fail"
+                                    reason = parsed_verdict.get("reason", "The edit does not match the user request.")
                     except (json.JSONDecodeError, ValueError, KeyError, IndexError):
-                        # Not JSON or couldn't parse, continue with text-based checks
+                        # Not JSON or couldn't parse, don't change the decision
                         pass
-                    
-                    # Fall back to traditional text-based checks
-                    # Check for uppercase version first
-                    if content.startswith("PASS"):
-                        decision = "pass"
-                        verdict_message = msg
-                        break
-                    elif content.startswith("FAIL"):
-                        decision = "fail"
-                        verdict_message = msg
-                        break
-                    
-                    # Fallback to lowercase for backwards compatibility
-                    content_lower = content.lower()
-                    if content_lower == "pass" or content_lower.startswith("pass "):
-                        decision = "pass"
-                        verdict_message = msg
-                        break
-                    elif content_lower == "fail" or content_lower.startswith("fail "):
-                        decision = "fail"
-                        verdict_message = msg
-                        break
             
-            # If no explicit verdict found, analyze the content sentiment
-            if not decision and last_msg and hasattr(last_msg, 'content'):
-                content = last_msg.content.lower()
-                
-                # Check for positive sentiment words
-                positive_indicators = ["successfully", "completed", "fulfilled", "satisfied", 
-                                      "correct", "properly", "accomplished", "implemented", "applied"]
-                negative_indicators = ["failed", "incorrect", "error", "wrong", "not fulfilled", 
-                                      "not satisfied", "missing", "problem"]
-                
-                pos_count = sum(1 for word in positive_indicators if word in content)
-                neg_count = sum(1 for word in negative_indicators if word in content)
-                
-                # If we have more positive than negative indicators, assume it passed
-                if pos_count > neg_count:
-                    decision = "pass"
-                    verdict_message = last_msg
-                # If clearly negative or error-focused, fail it
-                elif neg_count > pos_count + 1:  # Need significantly more negative terms
-                    decision = "fail"
-                    verdict_message = last_msg
-                else:
-                    # Default to PASS on ambiguous results after multiple verification steps
-                    if result.get("step_count", 0) >= 3:
-                        decision = "pass"
-                        verdict_message = last_msg
-            
-            # Default to pass if no decision was made but we ran multiple verification steps
+            # If we still don't have a decision, default to pass after sufficient verification
             if not decision:
-                decision = "pass"  # Default to pass unless clearly failed
-                verdict_message = last_msg
-                logger.info("[Supervisor] No clear verdict found, defaulting to PASS")
+                # Default to pass if we've gone through multiple verification steps
+                if result.get("step_count", 0) >= 3:
+                    decision = "pass"
+                    reason = "The edit appears to match the user request after multiple verification steps."
+                    logger.info("[Supervisor] No clear verdict found after multiple steps, defaulting to PASS")
+                else:
+                    # Otherwise default to fail to be conservative
+                    decision = "fail"
+                    reason = "Unable to verify that the edit matches the user request."
+                    logger.info("[Supervisor] No clear verdict found with insufficient steps, defaulting to FAIL")
 
             # Format the verification message based on the decision
             if decision == "pass":
                 verification_message = HumanMessage(
-                    content=f"CSV verification PASSED: The edit matches the core intent of the user request.\n\n{verdict_message.content if verdict_message else ''}",
+                    content=f"CSV verification PASSED: {reason}",
                     name="csv_verifier"
                 )
                 updated_messages = state["messages"] + [verification_message]
@@ -380,7 +371,7 @@ def create_csv_edit_supervisor_agent(verbose=False):
                 )
             else:
                 verification_message = HumanMessage(
-                    content=f"CSV verification FAILED: {verdict_message.content if verdict_message else 'The edit does not match the user request.'}",
+                    content=f"CSV verification FAILED: {reason}",
                     name="csv_verifier"
                 )
                 updated_messages = state["messages"] + [verification_message]
@@ -546,16 +537,51 @@ class CSVEditSupervisorAgent:
                 result = self.graph.invoke(supervisor_state)
                 supervisor_state = result
                 
-                # Check for completion
+                # Check for completion using JSON verdict if available
+                completion_detected = False
                 for msg in reversed(result.get("messages", [])):
                     if hasattr(msg, 'name') and msg.name == "csv_verifier" and hasattr(msg, 'content'):
-                        if "PASS" in msg.content.upper():
+                        content = msg.content
+                        
+                        # First try to extract JSON from the message if present
+                        try:
+                            import json
+                            json_content = None
+                            
+                            # Try to extract JSON from the message content
+                            if '```json' in content and '```' in content:
+                                json_start = content.find('```json') + 7
+                                json_end = content.find('```', json_start)
+                                if json_end > json_start:
+                                    json_content = content[json_start:json_end].strip()
+                            elif '{' in content and '}' in content:
+                                json_start = content.find('{')
+                                json_end = content.rfind('}') + 1
+                                if json_end > json_start:
+                                    json_content = content[json_start:json_end]
+                            
+                            if json_content:
+                                verdict_data = json.loads(json_content)
+                                if 'verdict' in verdict_data and verdict_data['verdict'] == "PASS":
+                                    if self.verbose:
+                                        logger.info(f"[Supervisor] Workflow completed successfully after {step_count} steps (JSON verdict)")
+                                    completion_detected = True
+                                    break
+                        except (json.JSONDecodeError, ValueError, KeyError, IndexError):
+                            # Not JSON or couldn't parse, fall back to string-based checks
+                            pass
+                        
+                        # Fall back to string check (for backward compatibility)
+                        if "PASS" in content.upper():
                             if self.verbose:
-                                logger.info(f"[Supervisor] Workflow completed successfully after {step_count} steps")
+                                logger.info(f"[Supervisor] Workflow completed successfully after {step_count} steps (string check)")
+                            completion_detected = True
                             break
                 
-                # Early exit if successful
-                if supervisor_state.get("next") == END:
+                # Early exit if successful (prioritize "next" state field then check completion detection)
+                if supervisor_state.get("next") == END or completion_detected:
+                    if self.verbose:
+                        logger.info("[Supervisor] Early exit on successful completion")
                     break
             
             if step_count >= max_steps:
