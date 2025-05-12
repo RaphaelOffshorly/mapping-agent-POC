@@ -228,3 +228,96 @@ body {
 .excel-grid-container, .excel-selection-container {
     -webkit-overflow-scrolling: touch;
 }
+
+/* AI Chatbot styles */
+.message {
+    margin-bottom: 10px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    max-width: 80%;
+    position: relative;
+}
+
+.user-message {
+    background-color: #e3f2fd;
+    margin-left: auto;
+    text-align: right;
+}
+
+.ai-message {
+    background-color: #f1f1f1;
+    margin-right: auto;
+}
+
+.message-content {
+    word-wrap: break-word;
+}
+
+.message-time {
+    font-size: 0.7rem;
+    color: #6c757d;
+    display: block;
+    margin-top: 4px;
+}
+
+.thinking {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 30px;
+}
+
+.thinking-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    margin: 0 2px;
+    background-color: #6c757d;
+    border-radius: 50%;
+    animation: thinking-animation 1.4s infinite ease-in-out both;
+}
+
+.thinking-dot:nth-child(1) {
+    animation-delay: -0.32s;
+}
+
+.thinking-dot:nth-child(2) {
+    animation-delay: -0.16s;
+}
+
+@keyframes thinking-animation {
+    0%, 80%, 100% {
+        transform: scale(0);
+    }
+    40% {
+        transform: scale(1);
+    }
+}
+
+/* Human-in-the-loop specific styles */
+.human-input-needed {
+    background-color: #fff3cd;
+    border-color: #ffeeba;
+}
+
+.awaiting-input {
+    border-left: 4px solid #ffc107;
+    padding-left: 10px;
+    background-color: #fffbf0;
+}
+
+.clarification-needed {
+    background-color: #fff3cd;
+    border-color: #ffeeba;
+    color: #856404;
+}
+
+/* Error message styling */
+.error-message {
+    background-color: #f8d7da;
+    border-color: #f5c6cb;
+    color: #721c24;
+    padding: 8px 12px;
+    border-radius: 8px;
+    margin-bottom: 10px;
+}

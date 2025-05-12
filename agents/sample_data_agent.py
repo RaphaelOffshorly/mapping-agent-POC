@@ -3,37 +3,40 @@ from typing import Dict, List, Any, Optional, Tuple
 
 from agents.base_agent import BaseAgent
 from tools.sample_data_tool import SampleDataTool
+from tools.data_suggestion_tool import DataSuggestionTool
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class SampleDataAgent(BaseAgent):
-    """Agent for extracting sample data for matched headers."""
+    """Agent for extracting sample data for matched headers using column ranges."""
     
     def __init__(self, verbose: bool = True):
         """Initialize the sample data agent."""
         super().__init__(
             name="sample_data_agent",
-            description="Extracts sample data for matched headers",
+            description="Extracts sample data for matched headers using column ranges",
             verbose=verbose
         )
         self.add_tool(SampleDataTool())
     
     def run(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Extract sample data for matched headers.
+        Extract sample data for matched headers using column ranges.
         
         Args:
             state: The current state, must contain 'file_path' and 'matches'
+                  Can optionally contain 'column_ranges' with pre-generated column ranges
             
         Returns:
             The updated state with 'sample_data' added
         """
-        self.think("Starting to extract sample data for matched headers")
+        self.think("Starting to extract sample data for matched headers using column ranges")
         
         file_path = state.get('file_path')
         matches = state.get('matches')
+        column_ranges = state.get('column_ranges')
         
         if not file_path or not matches:
             self.think("Missing required inputs, returning empty sample data")
@@ -57,12 +60,33 @@ class SampleDataAgent(BaseAgent):
             if len(valid_matches) > 3:
                 self.think(f"And {len(valid_matches) - 3} more valid matches...")
         
+        # Check if we have pre-generated column ranges
+        if column_ranges:
+            self.think(f"Using {len(column_ranges)} pre-generated column range sets")
+            # Log some examples of the column ranges
+            if column_ranges:
+                sample_ranges = list(column_ranges.items())[:2]
+                for target, ranges in sample_ranges:
+                    if ranges:
+                        self.think(f"Sample column ranges for '{target}': {ranges[:2]}")
+                        if len(ranges) > 2:
+                            self.think(f"And {len(ranges) - 2} more column ranges...")
+        else:
+            self.think("No pre-generated column ranges found, will generate them as needed")
+        
         logger.info(f"Extracting sample data for {len(matches)} matches")
         
         # Use the sample data tool
         sample_data_tool = self.tools[0]
         self.think("Using SampleDataTool to extract sample data")
-        sample_data = sample_data_tool.run((file_path, matches))
+        
+        # Pass column ranges if available
+        if column_ranges:
+            self.think("Passing pre-generated column ranges to the tool")
+            sample_data = sample_data_tool.run((file_path, matches, column_ranges))
+        else:
+            self.think("Letting the tool generate column ranges as needed")
+            sample_data = sample_data_tool.run((file_path, matches))
         
         self.think(f"Extracted sample data for {len(sample_data)} target columns")
         if sample_data:

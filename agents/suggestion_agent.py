@@ -10,13 +10,13 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class SuggestionAgent(BaseAgent):
-    """Agent for suggesting headers and data for target columns."""
+    """Agent for suggesting headers and column ranges for target columns."""
     
     def __init__(self, verbose: bool = True):
         """Initialize the suggestion agent."""
         super().__init__(
             name="suggestion_agent",
-            description="Suggests headers and data for target columns",
+            description="Suggests headers and column ranges for target columns",
             verbose=verbose
         )
         self.add_tool(HeaderSuggestionTool())
@@ -24,15 +24,15 @@ class SuggestionAgent(BaseAgent):
     
     def run(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Suggest headers and data for target columns.
+        Suggest headers and column ranges for target columns.
         
         Args:
             state: The current state, must contain 'file_path', 'target_columns', 'matches', and 'column_descriptions'
             
         Returns:
-            The updated state with 'suggested_headers' and 'suggested_data' added
+            The updated state with 'suggested_headers' and 'column_ranges' added
         """
-        self.think("Starting to suggest headers and data for target columns")
+        self.think("Starting to suggest headers and column ranges for target columns")
         
         file_path = state.get('file_path')
         target_columns = state.get('target_columns')
@@ -43,7 +43,7 @@ class SuggestionAgent(BaseAgent):
             self.think("Missing required inputs, returning empty suggestions")
             logger.error("Missing required inputs for SuggestionAgent")
             state['suggested_headers'] = {}
-            state['suggested_data'] = {}
+            state['column_ranges'] = {}
             return state
         
         self.think(f"Analyzing {len(target_columns)} target columns")
@@ -52,15 +52,15 @@ class SuggestionAgent(BaseAgent):
             if len(target_columns) > 5:
                 self.think(f"And {len(target_columns) - 5} more...")
         
-        logger.info(f"Suggesting headers and data for {len(target_columns)} target columns")
+        logger.info(f"Suggesting headers and column ranges for {len(target_columns)} target columns")
         
         # Get the tools
         header_suggestion_tool = self.tools[0]
         data_suggestion_tool = self.tools[1]
         
-        # Suggest headers and data for each target column
+        # Suggest headers and column ranges for each target column
         suggested_headers = {}
-        suggested_data = {}
+        column_ranges = {}
         
         for target_column in target_columns:
             self.think(f"Processing target column: '{target_column}'")
@@ -86,22 +86,22 @@ class SuggestionAgent(BaseAgent):
             else:
                 self.think(f"No matched header found for '{target_column}'")
             
-            # Suggest data for this target column
-            self.think(f"Using DataSuggestionTool to suggest data for '{target_column}'")
-            suggested_data_values = data_suggestion_tool.run((file_path, target_column, matched_header, column_description))
-            suggested_data[target_column] = suggested_data_values
+            # Generate column ranges for this target column
+            self.think(f"Using DataSuggestionTool to generate column ranges for '{target_column}'")
+            ranges = data_suggestion_tool.run((file_path, target_column, matched_header, column_description))
+            column_ranges[target_column] = ranges
             
-            self.think(f"Suggested {len(suggested_data_values)} data values for '{target_column}'")
-            if suggested_data_values:
-                self.think(f"Sample suggested data for '{target_column}': {suggested_data_values[:3]}")
-                if len(suggested_data_values) > 3:
-                    self.think(f"And {len(suggested_data_values) - 3} more values...")
+            self.think(f"Generated {len(ranges)} column ranges for '{target_column}'")
+            if ranges:
+                self.think(f"Sample ranges for '{target_column}': {ranges[:3]}")
+                if len(ranges) > 3:
+                    self.think(f"And {len(ranges) - 3} more ranges...")
         
         logger.info(f"Generated suggestions for {len(suggested_headers)} target columns")
         
         # Update the state
         state['suggested_headers'] = suggested_headers
-        state['suggested_data'] = suggested_data
+        state['column_ranges'] = column_ranges
         
-        self.think("Finished suggesting headers and data")
+        self.think("Finished suggesting headers and column ranges")
         return state

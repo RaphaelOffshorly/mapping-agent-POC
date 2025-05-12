@@ -27,3 +27,20 @@ class Config:
     HEADER_SCAN_ROWS = 20  # Number of rows to consider when inferring header
     CELL_SCAN_ROWS = 50    # Number of rows to scan for cell-level heuristics
     CELL_SCAN_COLS = 50    # Number of columns to scan for cell-level heuristics
+    
+    # Static messages
+    OUT_OF_SCOPE_MESSAGE = """
+    We're sorry, but your request is outside the scope of what this Excel header matcher tool can process.
+    
+    This tool is specifically designed to handle CSV file editing operations such as:
+    - Adding, removing, or modifying columns
+    - Updating cell values
+    - Filtering data
+    - Basic calculations
+    
+    For other tasks like creating presentations, generating complex visualizations, or 
+    performing operations on non-CSV files, please use an appropriate specialized tool.
+    
+    If you believe this is an error, please try rephrasing your request to focus specifically 
+    on CSV editing operations.
+    """

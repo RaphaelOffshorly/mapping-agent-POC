@@ -30,6 +30,7 @@ class WorkflowState(TypedDict):
     excel_preview: Optional[Dict[str, Any]]
     export_selections: Optional[Dict[str, str]]
     cell_coordinates: Optional[Dict[str, str]]
+    column_ranges: Optional[Dict[str, List[Tuple[str, str, str, str]]]]
     error: Optional[str]
 
 # Define the workflow steps
@@ -112,6 +113,7 @@ def run_workflow(file_path: str, target_columns: List[str], skip_suggestion: boo
         "excel_preview": None,
         "export_selections": {},
         "cell_coordinates": None,
+        "column_ranges": None,
         "error": None
     }
     

@@ -227,6 +227,142 @@ def find_cell_coordinates_for_data(file_path: str, data_values: List[str], max_r
         logger.error(f"Error finding cell coordinates: {e}")
         return []
 
+def retrieve_data_from_column_ranges(file_path: str, column_ranges: List[Tuple[str, str, str, str]]) -> List[str]:
+    """
+    Retrieve data from an Excel file using column ranges.
+    
+    Args:
+        file_path: The path to the Excel file
+        column_ranges: A list of tuples (sheet_name, column_letter, start_row, end_row)
+        
+    Returns:
+        A list of retrieved values from the specified column ranges
+    """
+    try:
+        if not column_ranges:
+            return []
+            
+        result = []
+        # Group ranges by sheet for efficiency
+        by_sheet = {}
+        for sheet_name, column_letter, start_row, end_row in column_ranges:
+            if sheet_name not in by_sheet:
+                by_sheet[sheet_name] = []
+            by_sheet[sheet_name].append((column_letter, start_row, end_row))
+        
+        # Read each sheet only once
+        for sheet_name, ranges in by_sheet.items():
+            try:
+                df = pd.read_excel(file_path, sheet_name=sheet_name, header=None)
+                
+                for column_letter, start_row, end_row in ranges:
+                    # Convert column letter to index
+                    col_idx = 0
+                    for i, letter in enumerate(reversed(column_letter)):
+                        col_idx += (ord(letter.upper()) - 64) * (26 ** i)
+                    col_idx -= 1  # Convert to 0-based index
+                    
+                    # Convert row numbers to 0-based indices
+                    try:
+                        start_row_idx = int(start_row) - 1
+                        end_row_idx = int(end_row) - 1
+                    except ValueError:
+                        logger.error(f"Invalid row indices: start_row={start_row}, end_row={end_row}")
+                        continue
+                    
+                    # Ensure indices are within bounds
+                    start_row_idx = max(0, start_row_idx)
+                    end_row_idx = min(len(df) - 1, end_row_idx)
+                    
+                    if start_row_idx > end_row_idx or col_idx < 0 or col_idx >= df.shape[1]:
+                        logger.warning(f"Invalid range: sheet={sheet_name}, column={column_letter}, " 
+                                       f"start_row={start_row}, end_row={end_row}")
+                        continue
+                    
+                    # Extract column data for the specified row range
+                    column_data = df.iloc[start_row_idx:end_row_idx+1, col_idx].tolist()
+                    
+                    # Convert values to strings and handle NaN
+                    for val in column_data:
+                        if pd.isna(val):
+                            result.append("")
+                        else:
+                            result.append(str(val))
+                    
+            except Exception as e:
+                logger.error(f"Error reading sheet {sheet_name}: {e}")
+                # Don't add empty values as we don't know how many should be added
+                
+        return result
+    except Exception as e:
+        logger.error(f"Error retrieving data from column ranges: {e}")
+        return []
+
+def retrieve_data_from_coordinates(file_path: str, coordinates: List[Tuple[str, str]]) -> List[str]:
+    """
+    Retrieve data from an Excel file using a list of coordinates.
+    
+    Args:
+        file_path: The path to the Excel file
+        coordinates: A list of tuples (sheet_name, cell_coordinate) to retrieve data from
+        
+    Returns:
+        A list of retrieved values from the specified coordinates
+    """
+    try:
+        if not coordinates:
+            return []
+            
+        result = []
+        # Group coordinates by sheet for efficiency
+        by_sheet = {}
+        for sheet_name, cell_coord in coordinates:
+            if sheet_name not in by_sheet:
+                by_sheet[sheet_name] = []
+            by_sheet[sheet_name].append(cell_coord)
+        
+        # Read each sheet only once
+        for sheet_name, cell_coords in by_sheet.items():
+            try:
+                df = pd.read_excel(file_path, sheet_name=sheet_name, header=None)
+                
+                for cell_coord in cell_coords:
+                    # Parse the cell coordinate (e.g., "A1")
+                    col_letter = ""
+                    row_idx = ""
+                    for char in cell_coord:
+                        if char.isalpha():
+                            col_letter += char
+                        else:
+                            row_idx += char
+                    
+                    # Convert Excel coordinate to DataFrame indices
+                    col_idx = 0
+                    for i, letter in enumerate(reversed(col_letter)):
+                        col_idx += (ord(letter.upper()) - 64) * (26 ** i)
+                    col_idx -= 1  # Convert to 0-based index
+                    
+                    row_idx = int(row_idx) - 1  # Convert to 0-based index
+                    
+                    # Get the value if within dataframe bounds
+                    if 0 <= row_idx < len(df) and 0 <= col_idx < df.shape[1]:
+                        val = df.iloc[row_idx, col_idx]
+                        if pd.isna(val):
+                            result.append("")
+                        else:
+                            result.append(str(val))
+                    else:
+                        result.append("")
+            except Exception as e:
+                logger.error(f"Error reading sheet {sheet_name}: {e}")
+                # Add empty values for all coordinates in this sheet
+                result.extend([""] * len(cell_coords))
+                
+        return result
+    except Exception as e:
+        logger.error(f"Error retrieving data from coordinates: {e}")
+        return []
+
 def get_column_letter(col_idx: int) -> str:
     """
     Convert a zero-based column index to an Excel column letter (A, B, C, ..., Z, AA, AB, ...).

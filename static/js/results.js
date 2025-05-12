@@ -2029,6 +2029,22 @@ function getOriginalExcelData() {
                     console.error("No CSV data to send");
                 }
                 
+                // If we have thread_id, add it to the request
+                if (chatbotState.threadId) {
+                    requestBody.thread_id = chatbotState.threadId;
+                    
+                    // Also add any other state information we're tracking
+                    requestBody.csv_file_path = chatbotState.csvFilePath;
+                    requestBody.original_request = chatbotState.originalRequest;
+                    requestBody.rewritten_request = chatbotState.rewrittenRequest;
+                    requestBody.in_clarification_mode = chatbotState.inClarificationMode;
+                    requestBody.is_request_clarified = chatbotState.isRequestClarified;
+                    requestBody.clarification_count = chatbotState.clarificationCount;
+                    requestBody.last_active_node = chatbotState.lastActiveNode;
+                    
+                    console.log("Resuming conversation with thread ID:", chatbotState.threadId);
+                }
+
                 // Send message to backend
                 fetch('/chat_with_csv_editor', {
                     method: 'POST',
@@ -2043,39 +2059,48 @@ function getOriginalExcelData() {
                     hideThinkingIndicator();
                     
                     if (data.success) {
-                        // Add AI response to chat
-                        addMessage('ai', data.response);
-                        
-                        // Check if the agent is waiting for clarification
-                        if (data.needs_clarification) {
-                            console.log("Agent needs clarification:", data.clarification_request);
+                        // First check if we need human input (new human-in-the-loop capability)
+                        if (data.needs_input && data.interrupt_message) {
+                            console.log("Server requested human input:", data.interrupt_message);
                             
-                            // Store the current state
-                            chatbotState.previousState = {
-                                awaiting_clarification: true,
-                                csv_data: chatbotState.editedCsvData
-                            };
+                            // Store conversation state
+                            chatbotState.threadId = data.thread_id;
+                            chatbotState.csvFilePath = data.csv_file_path;
+                            chatbotState.originalRequest = data.original_request;
+                            chatbotState.rewrittenRequest = data.rewritten_request;
+                            chatbotState.inClarificationMode = data.in_clarification_mode;
+                            chatbotState.isRequestClarified = data.is_request_clarified;
+                            chatbotState.clarificationCount = data.clarification_count;
+                            chatbotState.lastActiveNode = data.last_active_node;
                             
-                            // Show the clarification request as an AI message
-                            addMessage('ai', data.clarification_request || "I need your clarification on this request.");
+                            // Add the interrupt message to the chat
+                            addMessage('ai', data.interrupt_message);
                             
-                            // Update the UI to indicate awaiting clarification
-                            chatInput.placeholder = "Please provide clarification...";
-                            chatInput.classList.add("clarification-needed");
-                            sendMessageButton.innerHTML = '<i class="bi bi-send"></i> Send Clarification';
+                            // Update the UI to indicate waiting for human input
+                            chatInput.placeholder = "Please provide your input...";
+                            chatInput.classList.add("human-input-needed");
+                            sendMessageButton.innerHTML = '<i class="bi bi-send"></i> Send Input';
                             
                             // Add visual cue to the last AI message
                             const lastMessage = chatMessages.querySelector('.ai-message:last-of-type .message-content');
                             if (lastMessage) {
-                                lastMessage.classList.add("awaiting-clarification");
+                                lastMessage.classList.add("awaiting-input");
                             }
                         } else {
-                            // Clear previous state since we're not awaiting clarification anymore
-                            chatbotState.previousState = null;
+                            // Normal response without interrupt
                             
-                            // Reset UI elements if they were modified for clarification
+                            // Add AI response to chat
+                            addMessage('ai', data.response);
+                            
+                            // Clear previous human input state
+                            chatbotState.threadId = null;
+                            chatbotState.csvFilePath = null;
+                            chatbotState.inClarificationMode = false;
+                            chatbotState.isRequestClarified = false;
+                            
+                            // Reset UI elements
                             chatInput.placeholder = "Type your message here...";
-                            chatInput.classList.remove("clarification-needed");
+                            chatInput.classList.remove("human-input-needed");
                             sendMessageButton.innerHTML = '<i class="bi bi-send"></i> Send';
                             
                             // Update CSV data if changed
@@ -2211,40 +2236,48 @@ function getOriginalExcelData() {
                             generateCsvPreview();
                         }
                         
-                        // Force refresh the target columns display by fetching new data
-                        fetch('/get_all_sample_data')
-                            .then(response => response.json())
-                            .then(freshData => {
-                                if (freshData.success) {
-                                    console.log("Fresh data fetched after CSV edit:", freshData);
-                                    
-                                    // Get current column names from the DOM
-                                    const currentColumns = document.querySelectorAll('.table-striped tbody tr td:first-child');
-                                    const existingColumnNames = Array.from(currentColumns).map(col => col.textContent.trim());
-                                    
-                                    // Get new column names from the server response
-                                    const serverColumnNames = Object.keys(freshData.sample_data);
-                                    
-                                    // Check for columns added or removed
-                                    const newColumns = serverColumnNames.filter(col => !existingColumnNames.includes(col));
-                                    const deletedColumns = existingColumnNames.filter(col => !serverColumnNames.includes(col));
-                                    
-                                    // Check if any column data has been significantly modified
-                                    let dataModified = false;
-                                    const commonColumns = serverColumnNames.filter(col => existingColumnNames.includes(col));
-                                    
-                                    // Log changes for debugging
-                                    if (newColumns.length > 0) console.log("New columns detected:", newColumns);
-                                    if (deletedColumns.length > 0) console.log("Deleted columns detected:", deletedColumns);
-                                    
-                                    // If structure has changed or significant data changes, reload the page
-                                    if (newColumns.length > 0 || deletedColumns.length > 0) {
-                                        console.log("Column structure changed. Triggering page refresh.");
-                                        alert("The column structure of your data has changed. The page will refresh to show the updated table.");
-                                        window.location.reload();
-                                    }
-                                }
-                            })
+                                    // Force refresh the target columns display by fetching new data
+                                    fetch('/get_all_sample_data')
+                                        .then(response => response.json())
+                                        .then(freshData => {
+                                            if (freshData.success) {
+                                                console.log("Fresh data fetched after CSV edit:", freshData);
+                                                
+                                                // Get current column names from the DOM
+                                                const currentColumns = document.querySelectorAll('.table-striped tbody tr td:first-child');
+                                                const existingColumnNames = Array.from(currentColumns).map(col => col.textContent.trim());
+                                                
+                                                // Get new column names from the server response
+                                                const serverColumnNames = Object.keys(freshData.sample_data);
+                                                
+                                                // Check for columns added or removed
+                                                const newColumns = serverColumnNames.filter(col => !existingColumnNames.includes(col));
+                                                const deletedColumns = existingColumnNames.filter(col => !serverColumnNames.includes(col));
+                                                
+                                                // Detect potential renames by comparing the counts
+                                                // If number of new columns equals number of deleted columns, it's likely a rename operation
+                                                const potentialRenameOperation = newColumns.length > 0 && 
+                                                                                newColumns.length === deletedColumns.length;
+                                                
+                                                // Log changes for debugging
+                                                if (newColumns.length > 0) console.log("New columns detected:", newColumns);
+                                                if (deletedColumns.length > 0) console.log("Deleted columns detected:", deletedColumns);
+                                                if (potentialRenameOperation) console.log("Potential rename operation detected");
+                                                
+                                                // Always reload for any structure change to ensure everything is in sync
+                                                if (newColumns.length > 0 || deletedColumns.length > 0) {
+                                                    // For potential renames, customize the message
+                                                    if (potentialRenameOperation) {
+                                                        console.log("Column rename operation detected. Refreshing to update the display.");
+                                                        alert("Some columns have been renamed. Refreshing the page to update the display.");
+                                                    } else {
+                                                        console.log("Column structure changed. Triggering page refresh.");
+                                                        alert("The column structure of your data has changed. The page will refresh to show the updated table.");
+                                                    }
+                                                    window.location.reload();
+                                                }
+                                            }
+                                        })
                             .catch(error => {
                                 console.error("Error refreshing data:", error);
                             });

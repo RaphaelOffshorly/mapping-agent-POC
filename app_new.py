@@ -1126,14 +1126,18 @@ def get_csv_data():
 
 @app.route('/chat_with_csv_editor', methods=['POST'])
 def chat_with_csv_editor():
-    """Handle chatbot interactions for CSV editing."""
+    """Handle chatbot interactions for CSV editing with human-in-the-loop capability."""
     try:
         # Get data from request
         data = request.json
         message = data.get('message', '')
         csv_data = data.get('csv_data', {})
         source_data = data.get('source_data', {})
-        print(csv_data)
+        # Get thread_id to support multi-turn conversations with interruptions
+        thread_id = data.get('thread_id')
+        # Get the temp file path if this is a continuation of a previous conversation
+        csv_file_path = data.get('csv_file_path')
+        
         if not source_data:
             source_data = {}
             logger.info("No source data provided, using empty dict")
@@ -1144,6 +1148,8 @@ def chat_with_csv_editor():
         
         # Initialize logging
         logger.info(f"Chat message received: {message[:50]}...")
+        if thread_id:
+            logger.info(f"Continuing conversation with thread_id: {thread_id}")
         
         # Import the CSV Edit Supervisor Agent
         try:
@@ -1156,151 +1162,240 @@ def chat_with_csv_editor():
         
         # Convert the CSV data to a pandas DataFrame for the agent
         try:
-            # Create a message
-            from langchain_core.messages import HumanMessage
-            user_message = HumanMessage(content=message)
-            
-            # Convert csv_data to DataFrame and save to temp file
             import pandas as pd
             import tempfile
             import os
             import json
             
-            headers = csv_data.get('headers', [])
-            data_rows = csv_data.get('data', [])
+            # Create a message
+            from langchain_core.messages import HumanMessage
+            user_message = HumanMessage(content=message)
             
-            # Sanitize data rows to handle NaN values
-            sanitized_rows = []
-            for row in data_rows:
-                sanitized_row = {}
-                for key, value in row.items():
-                    # Convert NaN values to empty strings but preserve actual values
-                    if value is None or (isinstance(value, (float, int)) and pd.isna(value)):
-                        sanitized_row[key] = ""
-                    else:
-                        sanitized_row[key] = value
+            # Check if we're continuing a conversation with a temp file that already exists
+            if not csv_file_path or not os.path.exists(csv_file_path):
+                # This is a new conversation, create a new temp file
+                headers = csv_data.get('headers', [])
+                data_rows = csv_data.get('data', [])
                 
-                # Log the sanitized row for debugging
-                logger.info(f"Sanitized row: {sanitized_row}")
-                
-                # Check if the row has any non-empty values
-                has_data = any(val for val in sanitized_row.values() if val)
-                if not has_data:
-                    logger.warning(f"Row contains only empty values: {sanitized_row}")
-                
-                sanitized_rows.append(sanitized_row)
-            
-            # Log the data before creating DataFrame
-            logger.info(f"Creating DataFrame with {len(sanitized_rows)} rows and columns: {headers}")
-            if len(sanitized_rows) > 0:
-                logger.info(f"First row sample: {sanitized_rows[0]}")
-            
-            # Create DataFrame from the sanitized data rows
-            df = pd.DataFrame(sanitized_rows)
-            
-            # Log the DataFrame after creation
-            logger.info(f"Created DataFrame with shape: {df.shape}")
-            if not df.empty:
-                logger.info(f"DataFrame columns: {list(df.columns)}")
-                logger.info(f"DataFrame first row: {df.iloc[0].to_dict() if len(df) > 0 else 'No rows'}")
-            
-            # Create a temporary file for the CSV data in the system's temp directory
-            import uuid
-            fd, csv_file_path = tempfile.mkstemp(prefix='temp_csv_', suffix='.csv')
-            os.close(fd)  # Close the file descriptor
-            
-            # Save the DataFrame to the temporary file
-            df.to_csv(csv_file_path, index=False)
-            logger.info(f"Saved CSV data to temporary file: {csv_file_path}")
-            
-            # Verify the CSV file was written correctly
-            try:
-                # Read back the CSV file to verify it has data
-                verification_df = pd.read_csv(csv_file_path)
-                logger.info(f"Verification: CSV file contains {len(verification_df)} rows and {len(verification_df.columns)} columns")
-                if not verification_df.empty:
-                    logger.info(f"Verification: First row of CSV: {verification_df.iloc[0].to_dict() if len(verification_df) > 0 else 'No rows'}")
-                else:
-                    logger.warning("Verification: CSV file is empty (has headers but no data rows)")
+                # Sanitize data rows to handle NaN values
+                sanitized_rows = []
+                for row in data_rows:
+                    sanitized_row = {}
+                    for key, value in row.items():
+                        # Convert NaN values to empty strings but preserve actual values
+                        if value is None or (isinstance(value, (float, int)) and pd.isna(value)):
+                            sanitized_row[key] = ""
+                        else:
+                            sanitized_row[key] = value
                     
-                    # If the CSV is empty but we had data, try writing it again with a different method
-                    if len(sanitized_rows) > 0:
-                        logger.info("Attempting to rewrite CSV with alternative method...")
+                    # Log the sanitized row for debugging
+                    logger.info(f"Sanitized row: {sanitized_row}")
+                    
+                    # Check if the row has any non-empty values
+                    has_data = any(val for val in sanitized_row.values() if val)
+                    if not has_data:
+                        logger.warning(f"Row contains only empty values: {sanitized_row}")
+                    
+                    sanitized_rows.append(sanitized_row)
+                
+                # Log the data before creating DataFrame
+                logger.info(f"Creating DataFrame with {len(sanitized_rows)} rows and columns: {headers}")
+                if len(sanitized_rows) > 0:
+                    logger.info(f"First row sample: {sanitized_rows[0]}")
+                
+                # Create DataFrame from the sanitized data rows
+                df = pd.DataFrame(sanitized_rows)
+                
+                # Log the DataFrame after creation
+                logger.info(f"Created DataFrame with shape: {df.shape}")
+                if not df.empty:
+                    logger.info(f"DataFrame columns: {list(df.columns)}")
+                    logger.info(f"DataFrame first row: {df.iloc[0].to_dict() if len(df) > 0 else 'No rows'}")
+                
+                # Create a temporary file for the CSV data in the system's temp directory
+                import uuid
+                fd, csv_file_path = tempfile.mkstemp(prefix='temp_csv_', suffix='.csv')
+                os.close(fd)  # Close the file descriptor
+                
+                # Save the DataFrame to the temporary file
+                df.to_csv(csv_file_path, index=False)
+                logger.info(f"Saved CSV data to temporary file: {csv_file_path}")
+                
+                # Verify the CSV file was written correctly
+                try:
+                    # Read back the CSV file to verify it has data
+                    verification_df = pd.read_csv(csv_file_path)
+                    logger.info(f"Verification: CSV file contains {len(verification_df)} rows and {len(verification_df.columns)} columns")
+                    if not verification_df.empty:
+                        logger.info(f"Verification: First row of CSV: {verification_df.iloc[0].to_dict() if len(verification_df) > 0 else 'No rows'}")
+                    else:
+                        logger.warning("Verification: CSV file is empty (has headers but no data rows)")
                         
-                        # Method 1: Write directly with csv module
-                        import csv
-                        with open(csv_file_path, 'w', newline='') as csvfile:
-                            # Get field names from the first row
-                            fieldnames = list(sanitized_rows[0].keys())
-                            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                        # If the CSV is empty but we had data, try writing it again with a different method
+                        if len(sanitized_rows) > 0:
+                            logger.info("Attempting to rewrite CSV with alternative method...")
                             
-                            # Write headers and rows
-                            writer.writeheader()
-                            for row in sanitized_rows:
-                                writer.writerow(row)
-                        
-                        # Verify the rewrite worked
-                        verification_df = pd.read_csv(csv_file_path)
-                        logger.info(f"After rewrite: CSV file contains {len(verification_df)} rows and {len(verification_df.columns)} columns")
-            except Exception as e:
-                logger.error(f"Error verifying CSV file: {e}")
+                            # Method 1: Write directly with csv module
+                            import csv
+                            with open(csv_file_path, 'w', newline='') as csvfile:
+                                # Get field names from the first row
+                                fieldnames = list(sanitized_rows[0].keys())
+                                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                                
+                                # Write headers and rows
+                                writer.writeheader()
+                                for row in sanitized_rows:
+                                    writer.writerow(row)
+                            
+                            # Verify the rewrite worked
+                            verification_df = pd.read_csv(csv_file_path)
+                            logger.info(f"After rewrite: CSV file contains {len(verification_df)} rows and {len(verification_df.columns)} columns")
+                except Exception as e:
+                    logger.error(f"Error verifying CSV file: {e}")
+            else:
+                # We're continuing with an existing CSV file
+                logger.info(f"Continuing with existing CSV file: {csv_file_path}")
             
-            # Prepare the initial state
-            state = {
-                'messages': [user_message],
-                'csv_file_path': csv_file_path,
-                'source_data': source_data
-            }
+            # Prepare the state
+            if thread_id:
+                # If we have a thread_id, this is a continuation of a previous conversation
+                logger.info(f"Resuming conversation with thread_id: {thread_id}")
+                
+                # Get the original request from the request data
+                original_request = data.get('original_request', '')
+                
+                # Log the original request for debugging
+                logger.info(f"Original request for resume: '{original_request}'")
+                
+                # If original request is empty but we are resuming, try to extract it from 
+                # the first message's content to preserve context
+                if not original_request and message:
+                    original_request = message
+                    logger.info(f"Using current message as original request: '{original_request}'")
+                
+                # The state should contain everything needed for resumption
+                state = {
+                    'messages': [user_message],  # Only need the user's new message for resume
+                    'csv_file_path': csv_file_path,
+                    'source_data': source_data,
+                    'thread_id': thread_id,
+                    # Get these from request data if available
+                    'original_request': original_request,
+                    'rewritten_request': data.get('rewritten_request', ''),
+                    'in_clarification_mode': data.get('in_clarification_mode', False),
+                    'is_request_clarified': data.get('is_request_clarified', False),
+                    'clarification_count': data.get('clarification_count', 0),
+                    'last_active_node': data.get('last_active_node', '')
+                }
+                
+                # Resume the conversation by calling the resume method
+                logger.info(f"Resuming conversation with state: {state}")
+                result = agent.resume(state, message)
+            else:
+                # This is a new conversation
+                logger.info("Starting new conversation")
+                # Store the original request in the state
+                original_request = message
+                logger.info(f"Setting original request: '{original_request}'")
+                
+                state = {
+                    'messages': [user_message],
+                    'csv_file_path': csv_file_path,
+                    'source_data': source_data,
+                    'original_request': original_request  # Explicitly set the original request
+                }
+                
+                # Run the agent
+                logger.info("Running CSV Edit Supervisor Agent")
+                result = agent.run(state)
             
-            # Run the agent
-            logger.info("Running CSV Edit Supervisor Agent")
-            result = agent.run(state)
-            logger.info("CSV Edit Supervisor Agent completed")
+            logger.info("CSV Edit Supervisor Agent execution completed")
+            
+            # Check if we need to interrupt for user input
+            interrupt_message = result.get('interrupt_message')
+            needs_input = result.get('needs_input', False)
+            
+            if needs_input and interrupt_message:
+                logger.info(f"Supervisor agent requesting human input: {interrupt_message}")
+                
+                # Don't delete the temporary file, as we'll need it for the resumed conversation
+                # Instead, return response indicating the need for user input
+                # Include thread_id, csv_file_path, and all state needed for resumption
+                response_obj = {
+                    'success': True,
+                    'needs_input': True,
+                    'interrupt_message': interrupt_message,
+                    'thread_id': result.get('thread_id'),
+                    'csv_file_path': csv_file_path,
+                    'csv_data': csv_data,  # Return the original data
+                    'original_request': result.get('original_request', ''),
+                    'rewritten_request': result.get('rewritten_request', ''),
+                    'in_clarification_mode': result.get('in_clarification_mode', False),
+                    'is_request_clarified': result.get('is_request_clarified', False),
+                    'clarification_count': result.get('clarification_count', 0),
+                    'last_active_node': result.get('last_active_node', '')
+                }
+                
+                return app.response_class(
+                    response=json.dumps(response_obj, cls=NpEncoder),
+                    status=200,
+                    mimetype='application/json'
+                )
             
             # Process the response by extracting messages from named agents
             from langchain_core.messages import AIMessage
             
-            # Extract responses from named agents (primary source of information)
-            supervisor_messages = [msg for msg in result.get('messages', []) 
-                                 if isinstance(msg, HumanMessage) and getattr(msg, 'name', '') == 'supervisor']
-            edit_messages = [msg for msg in result.get('messages', []) 
-                           if isinstance(msg, HumanMessage) and getattr(msg, 'name', '') == 'csv_edit']
-            verifier_messages = [msg for msg in result.get('messages', []) 
-                               if isinstance(msg, HumanMessage) and getattr(msg, 'name', '') == 'csv_verifier']
+            # First check if there are any out-of-scope messages from the request_clarifier
+            request_clarifier_messages = [msg for msg in result.get('messages', [])
+                                         if isinstance(msg, HumanMessage) and getattr(msg, 'name', '') == 'request_clarifier'
+                                         and "OUT_OF_SCOPE" in msg.content]
             
-            # Find the action summary message (should be at the end of the conversation)
-            action_summary = next((msg.content for msg in reversed(result.get('messages', [])) 
-                                 if isinstance(msg, HumanMessage) and getattr(msg, 'name', '') == 'csv_edit' 
-                                 and not msg.content.startswith("CSV edit complete")), None)
-            
-            # Also collect AIMessages as a fallback
-            ai_messages = [msg for msg in result.get('messages', []) if isinstance(msg, AIMessage)]
-            
-            # Build response from components
-            agent_responses = []
-            
-            # Add the action summary first if available (most important)
-            if action_summary:
-                agent_responses.append(action_summary)
+            # If we found an out-of-scope message, use the standardized message from Config
+            if request_clarifier_messages:
+                logger.info("Out-of-scope request detected in response processing")
+                response = Config.OUT_OF_SCOPE_MESSAGE
             else:
-                # If no action summary, compile from individual agent messages
-                if supervisor_messages:
-                    agent_responses.append(f"Supervisor: {supervisor_messages[-1].content}")
-                if edit_messages:
-                    agent_responses.append(f"Edit: {edit_messages[-1].content}")
-                if verifier_messages:
-                    agent_responses.append(f"Verification: {verifier_messages[-1].content}")
+                # Extract responses from named agents (primary source of information)
+                supervisor_messages = [msg for msg in result.get('messages', []) 
+                                     if isinstance(msg, HumanMessage) and getattr(msg, 'name', '') == 'supervisor']
+                edit_messages = [msg for msg in result.get('messages', []) 
+                               if isinstance(msg, HumanMessage) and getattr(msg, 'name', '') == 'csv_edit']
+                verifier_messages = [msg for msg in result.get('messages', []) 
+                                   if isinstance(msg, HumanMessage) and getattr(msg, 'name', '') == 'csv_verifier']
                 
-                # If we still don't have any agent responses, fall back to AI messages
-                if not agent_responses and ai_messages:
-                    agent_responses.append(ai_messages[-1].content)
-            
-            # Combine responses or use fallback
-            if agent_responses:
-                response = "\n\n".join(agent_responses)
-            else:
-                # Only use this generic message if we truly have no responses
-                response = "The CSV editor processed your request but did not provide detailed feedback."
+                # Find the action summary message (should be at the end of the conversation)
+                action_summary = next((msg.content for msg in reversed(result.get('messages', [])) 
+                                     if isinstance(msg, HumanMessage) and getattr(msg, 'name', '') == 'csv_edit' 
+                                     and not msg.content.startswith("CSV edit complete")), None)
+                
+                # Also collect AIMessages as a fallback
+                ai_messages = [msg for msg in result.get('messages', []) if isinstance(msg, AIMessage)]
+                
+                # Build response from components
+                agent_responses = []
+                
+                # Add the action summary first if available (most important)
+                if action_summary:
+                    agent_responses.append(action_summary)
+                else:
+                    # If no action summary, compile from individual agent messages
+                    if supervisor_messages:
+                        agent_responses.append(f"Supervisor: {supervisor_messages[-1].content}")
+                    if edit_messages:
+                        agent_responses.append(f"Edit: {edit_messages[-1].content}")
+                    if verifier_messages:
+                        agent_responses.append(f"Verification: {verifier_messages[-1].content}")
+                    
+                    # If we still don't have any agent responses, fall back to AI messages
+                    if not agent_responses and ai_messages:
+                        agent_responses.append(ai_messages[-1].content)
+                
+                # Combine responses or use fallback
+                if agent_responses:
+                    response = "\n\n".join(agent_responses)
+                else:
+                    # Only use this generic message if we truly have no responses
+                    response = "The CSV editor processed your request but did not provide detailed feedback."
             
             # Check if the CSV file was modified by reading it back
             csv_data_changed = False
@@ -1334,13 +1429,15 @@ def chat_with_csv_editor():
             except Exception as e:
                 logger.error(f"Error reading back CSV file: {e}", exc_info=True)
             
-            # Clean up the temporary file
-            try:
-                if os.path.exists(csv_file_path):
-                    os.remove(csv_file_path)
-                    logger.info(f"Removed temporary CSV file: {csv_file_path}")
-            except Exception as e:
-                logger.warning(f"Failed to remove temporary CSV file: {e}")
+            # Clean up the temporary file - only if we're done with the conversation
+            # Don't clean up if we are using human-in-the-loop and might need to resume
+            if not needs_input and not interrupt_message:
+                try:
+                    if os.path.exists(csv_file_path):
+                        os.remove(csv_file_path)
+                        logger.info(f"Removed temporary CSV file: {csv_file_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to remove temporary CSV file: {e}")
             
             # Update the session data so it's available for the CSV Export tab
             if csv_data_changed:
@@ -1355,20 +1452,20 @@ def chat_with_csv_editor():
                             column_data.append(row[col])
                     new_sample_data[col] = column_data
                 
-            # Update session data - explicitly update this to ensure export has latest data
-            logger.info(f"Updating session sample_data with CSV edit agent changes for columns: {headers}")
-            
-            # Check if any new columns were added that aren't in the target_columns
-            target_columns = session.get('target_columns', [])
-            new_columns = [col for col in headers if col not in target_columns]
-            
-            if new_columns:
-                logger.info(f"New columns added by chatbot: {new_columns}")
-                # Add the new columns to target_columns in the session
-                session['target_columns'] = target_columns + new_columns
-            
-            # Update the sample data with all columns, including new ones
-            session['sample_data'] = new_sample_data
+                # Update session data - explicitly update this to ensure export has latest data
+                logger.info(f"Updating session sample_data with CSV edit agent changes for columns: {headers}")
+                
+                # Check if any new columns were added that aren't in the target_columns
+                target_columns = session.get('target_columns', [])
+                new_columns = [col for col in headers if col not in target_columns]
+                
+                if new_columns:
+                    logger.info(f"New columns added by chatbot: {new_columns}")
+                    # Add the new columns to target_columns in the session
+                    session['target_columns'] = target_columns + new_columns
+                
+                # Update the sample data with all columns, including new ones
+                session['sample_data'] = new_sample_data
             
             # Create response object with sanitized data
             # Manually sanitize the data to ensure no NaN values
@@ -1392,7 +1489,8 @@ def chat_with_csv_editor():
                 'success': True,
                 'response': response,
                 'csv_data': sanitized_csv_data,
-                'csv_data_changed': csv_data_changed
+                'csv_data_changed': csv_data_changed,
+                'needs_input': False  # Explicitly mark that we don't need input
             }
             
             logger.info("Successfully processed chat_with_csv_editor request with sanitized data")
@@ -1438,6 +1536,9 @@ def update_csv_preview():
         logger.info(f"Updating CSV preview with {len(headers)} columns and {len(data_rows)} rows")
         logger.debug(f"Headers before update: {list(sample_data.keys())}")
         
+        # Create a completely new sample_data dictionary, effectively replacing
+        # the old one rather than merging with it. This ensures renamed columns
+        # don't appear twice.
         new_sample_data = {}
         
         for col in headers:
@@ -1448,7 +1549,11 @@ def update_csv_preview():
             new_sample_data[col] = column_data
             logger.debug(f"Column {col} updated with {len(column_data)} values")
         
-        # Update session data with edited values
+        # Replace target_columns list with the new headers to make sure
+        # everything stays in sync when columns are renamed
+        session['target_columns'] = headers
+        
+        # Update session data with edited values - completely replacing old data
         session['sample_data'] = new_sample_data
         logger.info(f"Session sample_data updated successfully with {len(new_sample_data)} columns")
         
