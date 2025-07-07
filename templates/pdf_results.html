@@ -349,11 +349,50 @@
                 });
             }
             
-            // Export CSV button
+            // Export CSV button with validation
             const exportCsvBtn = document.getElementById('exportCsvBtn');
             if (exportCsvBtn) {
                 exportCsvBtn.addEventListener('click', function() {
-                    window.location.href = '/download_csv';
+                    // First validate commodity selections
+                    validateAndDownloadCsv();
+                });
+            }
+            
+            // Validation and download function
+            function validateAndDownloadCsv() {
+                // First check if auto-save is complete
+                if (window.commodityAutoSaveComplete === false) {
+                    console.log("Auto-save still in progress, waiting...");
+                    setTimeout(validateAndDownloadCsv, 500); // Wait 500ms and try again
+                    return;
+                }
+                
+                // Validate commodity selections
+                fetch('/validate_commodity_selections', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({})
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.valid) {
+                        console.log("Validation successful:", data.message);
+                        // Proceed with download
+                        window.location.href = '/download_csv';
+                    } else {
+                        console.warn("Validation failed:", data.error);
+                        // Show user-friendly message
+                        alert(`Export validation failed: ${data.error}\n\nPlease ensure all commodity code selections are saved before exporting.`);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error validating commodity selections:', error);
+                    // Allow download anyway in case of validation error
+                    if (confirm('Unable to validate commodity selections. Do you want to proceed with the export anyway?')) {
+                        window.location.href = '/download_csv';
+                    }
                 });
             }
         });

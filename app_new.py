@@ -3136,6 +3136,100 @@ def update_commodity_selection():
         logger.error(f"Error updating commodity selection: {e}")
         return jsonify({'error': str(e)})
 
+@app.route('/batch_update_commodity_selections', methods=['POST'])
+def batch_update_commodity_selections():
+    """Update multiple commodity code selections in a single request."""
+    try:
+        data = request.json
+        selections = data.get('selections', [])
+        
+        if not selections:
+            return jsonify({'error': 'No selections provided'})
+        
+        # Get or create commodity selections in session
+        commodity_selections = session.get('commodity_selections', {})
+        
+        # Process all selections
+        updated_count = 0
+        for selection in selections:
+            row_index = selection.get('rowIndex')
+            commodity_code = selection.get('selectedValue')
+            display_text = selection.get('selectedText', '')
+            
+            if row_index is not None:
+                # Store the selection (use string key for JSON serialization)
+                commodity_selections[str(row_index)] = {
+                    'code': commodity_code,
+                    'display_text': display_text
+                }
+                updated_count += 1
+                logger.info(f"Batch updated commodity selection for row {row_index}: {commodity_code} ({display_text})")
+        
+        # Update session with all changes
+        session['commodity_selections'] = commodity_selections
+        
+        logger.info(f"Batch updated {updated_count} commodity selections successfully")
+        
+        return jsonify({
+            'success': True,
+            'message': f'Successfully updated {updated_count} commodity selections',
+            'updated_count': updated_count
+        })
+        
+    except Exception as e:
+        logger.error(f"Error batch updating commodity selections: {e}")
+        return jsonify({'error': str(e)})
+
+@app.route('/validate_commodity_selections', methods=['POST'])
+def validate_commodity_selections():
+    """Validate that all required commodity selections are saved."""
+    try:
+        # Get current data to determine expected number of rows
+        extracted_data = session.get('extracted_data', {})
+        commodity_selections = session.get('commodity_selections', {})
+        
+        if not extracted_data:
+            return jsonify({'valid': False, 'error': 'No data found for validation'})
+        
+        # Determine number of expected rows
+        expected_rows = 0
+        array_of_objects_field = None
+        
+        for field, value in extracted_data.items():
+            if isinstance(value, list) and len(value) > 0 and isinstance(value[0], dict):
+                array_of_objects_field = field
+                expected_rows = len(value)
+                logger.info(f"Found {expected_rows} expected rows in array of objects field '{field}'")
+                break
+        
+        if expected_rows == 0:
+            # Single row or no array data - no validation needed
+            return jsonify({'valid': True, 'message': 'No commodity selections required for validation'})
+        
+        # Check if we have commodity selections for all rows
+        missing_rows = []
+        for row_index in range(expected_rows):
+            if str(row_index) not in commodity_selections:
+                missing_rows.append(row_index)
+        
+        if missing_rows:
+            logger.warning(f"Missing commodity selections for rows: {missing_rows}")
+            return jsonify({
+                'valid': False, 
+                'error': f'Missing commodity selections for {len(missing_rows)} rows',
+                'missing_rows': missing_rows
+            })
+        
+        logger.info(f"All {expected_rows} commodity selections validated successfully")
+        return jsonify({
+            'valid': True, 
+            'message': f'All {expected_rows} commodity selections are saved'
+        })
+        
+    except Exception as e:
+        logger.error(f"Error validating commodity selections: {e}")
+        return jsonify({'valid': False, 'error': str(e)})
+
 @app.route('/update_csv_preview', methods=['POST'])
 def update_csv_preview():
     """Update the session with edited CSV data."""

@@ -1235,21 +1235,59 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         });
         
-        // Save selections sequentially to avoid race conditions
-        saveSelectionsSequentially(selectionsToSave, 0);
+        // Save all selections in a single batch to avoid race conditions
+        saveBatchCommoditySelections(selectionsToSave);
+    }
+    
+    function saveBatchCommoditySelections(selections) {
+        if (selections.length === 0) {
+            console.log("No commodity selections to save");
+            return Promise.resolve();
+        }
+        
+        console.log(`Batch saving ${selections.length} commodity selections...`);
+        
+        // Create a single request with all selections
+        return fetch('/batch_update_commodity_selections', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                selections: selections
+            })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                console.log(`Successfully batch saved ${selections.length} commodity selections`);
+                // Mark that auto-save is complete
+                window.commodityAutoSaveComplete = true;
+            } else {
+                console.error(`Failed to batch save commodity selections:`, data.error);
+                // Fall back to individual saves if batch fails
+                return saveSelectionsSequentially(selections, 0);
+            }
+        })
+        .catch(error => {
+            console.error(`Error batch saving commodity selections:`, error);
+            // Fall back to individual saves if batch fails
+            return saveSelectionsSequentially(selections, 0);
+        });
     }
     
     function saveSelectionsSequentially(selections, index) {
         if (index >= selections.length) {
             console.log("Completed auto-saving all default commodity selections");
-            return;
+            window.commodityAutoSaveComplete = true;
+            return Promise.resolve();
         }
         
         const selection = selections[index];
         console.log(`Auto-saving default commodity code for row ${selection.rowIndex}: ${selection.selectedValue} (${selection.selectedText})`);
         
         // Save this selection
-        fetch('/update_commodity_selection', {
+        return fetch('/update_commodity_selection', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -1268,18 +1306,14 @@ document.addEventListener('DOMContentLoaded', function() {
                 console.error(`Failed to auto-save default commodity selection for row ${selection.rowIndex}:`, data.error);
             }
             
-            // Continue with the next selection after a small delay
-            setTimeout(() => {
-                saveSelectionsSequentially(selections, index + 1);
-            }, 50); // 50ms delay between saves
+            // Continue with the next selection immediately (no delay needed)
+            return saveSelectionsSequentially(selections, index + 1);
         })
         .catch(error => {
             console.error(`Error auto-saving default commodity selection for row ${selection.rowIndex}:`, error);
             
             // Continue with the next selection even if this one failed
-            setTimeout(() => {
-                saveSelectionsSequentially(selections, index + 1);
-            }, 50);
+            return saveSelectionsSequentially(selections, index + 1);
         });
     }
     
