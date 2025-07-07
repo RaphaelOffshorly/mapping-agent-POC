@@ -547,16 +547,17 @@ def excel_coordinate_extractor(
 @tool
 def csv_pandas_eval(
     csv_file_path: str,
-    verification_code: str
+    verification_code: str,
+    unedited_csv_path: str = ""
 ) -> str:
     """
     Execute a verification code block on the CSV file to evaluate data without modifying it.
-    The function should define 'verify_dataframe(df)' that returns verification results.
-    The DataFrame is available as 'df' inside your function.
+    The function should define 'verify_dataframe(df, unedited_df)' that takes both the edited and unedited DataFrames.
     
     Args:
-        csv_file_path: Path to the CSV file
-        verification_code: A code block that defines a function named 'verify_dataframe' that takes a DataFrame parameter and returns verification results
+        csv_file_path: Path to the edited CSV file
+        verification_code: A code block that defines a function named 'verify_dataframe' that compares both DataFrames
+        unedited_csv_path: Path to the unedited/original CSV file for comparison (REQUIRED)
     
     Returns:
         The result of the verification or an error message.
@@ -570,9 +571,19 @@ def csv_pandas_eval(
         return f"CSV file not found: {csv_file_path}"
         
     try:
-        # Load the CSV file into a pandas DataFrame
+        # Load the edited CSV file into a pandas DataFrame
         df = load_dataframe_from_csv(csv_file_path)
-        logger.info(f"Loaded DataFrame for verification: {csv_file_path}, shape={df.shape}")
+        logger.info(f"Loaded edited DataFrame for verification: {csv_file_path}, shape={df.shape}")
+        
+        # Load the unedited CSV file - this is required for proper verification
+        unedited_df = None
+        if unedited_csv_path and os.path.exists(unedited_csv_path):
+            unedited_df = load_dataframe_from_csv(unedited_csv_path)
+            logger.info(f"Loaded unedited DataFrame for comparison: {unedited_csv_path}, shape={unedited_df.shape}")
+        else:
+            error_msg = f"ERROR: Unedited CSV file not found or not provided: {unedited_csv_path}"
+            logger.error(error_msg)
+            return error_msg
         
         # Define a safe import function that only allows importing specific modules
         def safe_import(name, *args, **kwargs):
@@ -626,7 +637,8 @@ def csv_pandas_eval(
             "concat": pd.concat,
             "len": len,
             "range": range,
-            "df": df  # Make df available in the global scope
+            "df": df,  # Make edited df available in the global scope
+            "unedited_df": unedited_df  # Make unedited df available (could be None)
         }
         
         # Similar to sanitize_edit_function but for verify_dataframe
@@ -659,10 +671,14 @@ def csv_pandas_eval(
                 logger.warning(f"Found unmatched closing brace '{brace}' at position {pos}, removing it")
                 code = code[:pos] + code[pos+1:]
             
-            # If code doesn't have the 'def verify_dataframe(' declaration, try to fix it
-            if not re.search(r'def\s+verify_dataframe\s*\(\s*df\s*\)\s*:', code):
-                # Check if there's any function defined
-                function_match = re.search(r'def\s+(\w+)\s*\(\s*df\s*\)\s*:', code)
+            # Update regex to support the new function signature with required or optional unedited_df parameter
+            # Check for all possible parameter combinations
+            if not (re.search(r'def\s+verify_dataframe\s*\(\s*df\s*,\s*unedited_df\s*\)\s*:', code) or 
+                    re.search(r'def\s+verify_dataframe\s*\(\s*df\s*,\s*unedited_df\s*=\s*None\s*\)\s*:', code) or 
+                    re.search(r'def\s+verify_dataframe\s*\(\s*df\s*\)\s*:', code)):
+                
+                # Check if there's any function defined with df parameter
+                function_match = re.search(r'def\s+(\w+)\s*\(\s*df\s*(?:,\s*unedited_df(?:\s*=\s*None)?)?\s*\)\s*:', code)
                 if function_match:
                     # If a function is defined but with a different name, rename it
                     wrong_name = function_match.group(1)
@@ -681,7 +697,8 @@ def csv_pandas_eval(
                     if not any(re.search(r'\s*return\s+', line) for line in indented_lines):
                         indented_lines.append("    return result")
                     
-                    code = "def verify_dataframe(df):\n    result = None\n" + "\n".join(indented_lines)
+                    # Create function with support for unedited_df
+                    code = "def verify_dataframe(df, unedited_df):\n\n" + "\n".join(indented_lines)
             
             # Ensure the function returns something
             if not re.search(r'\s*return\s+', code):
@@ -759,8 +776,8 @@ def csv_pandas_eval(
             logger.error(f"Error executing verification function definition: {e}", exc_info=True)
             return f"Error executing verification function definition: {str(e)}\nTraceback:\n{traceback.format_exc()}"
         
-        # Call the verification function with the DataFrame
-        verification_result = verify_function(df)
+        # Always pass both dataframes to the verification function - unedited CSV is required
+        verification_result = verify_function(df, unedited_df)
         logger.info(f"Verification function executed, result type: {type(verification_result).__name__}")
         
         # Convert result to string for return

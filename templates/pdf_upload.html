@@ -55,7 +55,7 @@
                             </div>
                             
                             <div class="mb-3">
-                                <button type="button" class="btn btn-primary" id="saveSchemaBtn">
+                                <button type="button" class="btn btn-primary" id="saveSchemaOldBtn">
                                     Save Schema and Continue
                                 </button>
                             </div>
@@ -87,7 +87,129 @@
         </div>
     </div>
 
+    <!-- Schema Builder Modal -->
+    <div class="modal fade" id="schemaBuilderModal" tabindex="-1" aria-labelledby="schemaBuilderModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-xl">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="schemaBuilderModalLabel">Schema Builder</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <!-- Schema Builder Interface -->
+                    <div id="schemaBuilderContent">
+                        <div class="alert alert-info">
+                            <i class="bi bi-info-circle-fill me-2"></i>
+                            Customize the schema for your target columns. This helps improve data mapping accuracy.
+                        </div>
+                        
+                        <table class="table table-bordered" id="schemaTable">
+                            <thead>
+                                <tr>
+                                    <th>Target Column</th>
+                                    <th>Data Type</th>
+                                    <th>Description</th>
+                                    <th>Required</th>
+                                </tr>
+                            </thead>
+                            <tbody id="schemaTableBody">
+                                <!-- Schema rows will be inserted here -->
+                                <tr>
+                                    <td colspan="4" class="text-center">Loading schema data...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    
+                    <!-- Array of Objects Configuration -->
+                    <div class="card mt-3">
+                        <div class="card-header">
+                            <h6 class="mb-0">Array of Objects Configuration</h6>
+                            <small class="text-muted">Only available in PDF mode</small>
+                        </div>
+                        <div class="card-body">
+                            <div class="form-check form-switch mb-3">
+                                <input class="form-check-input" type="checkbox" id="arrayOfObjectsToggle">
+                                <label class="form-check-label fw-bold" for="arrayOfObjectsToggle">
+                                    Convert to Array of Objects
+                                </label>
+                                <div class="form-text">
+                                    Convert the current schema into an array of objects containing the initial schema. 
+                                    Array types will be flattened to their base types.
+                                </div>
+                            </div>
+                            
+                            <div id="arrayConfigFields" class="d-none">
+                                <div class="mb-3">
+                                    <label for="arrayName" class="form-label">Array Name</label>
+                                    <input type="text" class="form-control" id="arrayName" value="Invoice Data">
+                                    <div class="form-text">Name for the array wrapper property</div>
+                                </div>
+                                <div class="mb-3">
+                                    <label for="arrayDescription" class="form-label">Array Description</label>
+                                    <textarea class="form-control" id="arrayDescription" rows="2">sample description</textarea>
+                                    <div class="form-text">Description for the array wrapper property</div>
+                                </div>
+                            </div>
+                            
+                            <div class="alert alert-warning d-none" id="arrayModeWarning">
+                                <i class="bi bi-exclamation-triangle"></i>
+                                <strong>Array Mode Active:</strong> Array types are disabled and converted to base types. 
+                                Toggle off to restore original array configurations.
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Schema Management -->
+                    <div class="row mt-4">
+                        <div class="col-md-6">
+                            <div class="card">
+                                <div class="card-header">Save Schema</div>
+                                <div class="card-body">
+                                    <div class="input-group mb-3">
+                                        <input type="text" class="form-control" id="schemaName" placeholder="Schema Name">
+                                        <button class="btn btn-primary" id="saveSchemaBtn">Save</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="card">
+                                <div class="card-header">Schema Operations</div>
+                                <div class="card-body">
+                                    <div class="d-flex gap-2">
+                                        <button class="btn btn-secondary" id="downloadSchemaBtn">Download</button>
+                                        <label class="btn btn-secondary mb-0">
+                                            Upload
+                                            <input type="file" id="uploadSchemaInput" hidden accept=".json">
+                                        </label>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Saved Schemas -->
+                    <div class="card mt-3">
+                        <div class="card-header">Saved Schemas</div>
+                        <div class="card-body">
+                            <div id="savedSchemasList" class="list-group">
+                                <!-- Saved schemas will be listed here -->
+                                <div class="list-group-item">Loading saved schemas...</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary" id="applySchemaBtn">Apply Schema and Continue</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css"></script>
     <script src="{{ url_for('static', filename='js/pdf_upload.js') }}"></script>
 </body>
 </html>

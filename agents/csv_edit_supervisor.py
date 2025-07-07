@@ -1,5 +1,6 @@
 import logging
 import operator
+import os
 import uuid
 from typing import Dict, Any, Literal, TypedDict, Annotated, List, Union, Optional
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
@@ -35,6 +36,7 @@ class SupervisorState(TypedDict):
     interrupt_message: Optional[str] = None  # Instead of __interrupt__
     needs_input: bool = False  # Flag to indicate if user input is needed
     last_active_node: str = ""  # Track the last active node
+    unedited_csv_path: str = ""  # Path to the original CSV before edits for verification
 
 def create_csv_edit_supervisor_agent(verbose=False):
     """
@@ -620,10 +622,32 @@ def create_csv_edit_supervisor_agent(verbose=False):
                         )
                 break
                 
+        # Create a backup of the original CSV if it doesn't exist already
+        unedited_csv_path = state.get("unedited_csv_path", "")
+        if not unedited_csv_path and state["csv_file_path"] and os.path.exists(state["csv_file_path"]):
+            try:
+                import tempfile
+                import shutil
+                
+                # Create temp file for original CSV
+                fd, unedited_csv_path = tempfile.mkstemp(prefix='original_', suffix='.csv')
+                os.close(fd)
+                
+                # Copy original CSV to temp file
+                shutil.copy2(state["csv_file_path"], unedited_csv_path)
+                if verbose:
+                    logger.info(f"[Supervisor] Created backup of original CSV at {unedited_csv_path}")
+                
+                # Store the path in state
+                state["unedited_csv_path"] = unedited_csv_path
+            except Exception as e:
+                logger.error(f"[Supervisor] Error creating CSV backup: {e}")
+        
         agent_input = {
             "messages": state["messages"],
             "csv_file_path": state["csv_file_path"],
-            "source_data": state.get("source_data", {})
+            "source_data": state.get("source_data", {}),
+            "unedited_csv_path": unedited_csv_path
         }
         
         # If we have a rewritten request from clarification, use it
@@ -711,11 +735,19 @@ def create_csv_edit_supervisor_agent(verbose=False):
         
         updated_messages = state["messages"] + relevant_messages + [edit_summary]
         
+        # Get the unedited_csv_path from the result if available
+        result_unedited_csv_path = result.get("unedited_csv_path", "")
+        if result_unedited_csv_path:
+            if verbose:
+                logger.info(f"[Supervisor] Got unedited CSV path from edit agent: {result_unedited_csv_path}")
+            unedited_csv_path = result_unedited_csv_path
+        
         return Command(
             update={
                 "messages": updated_messages,
                 "csv_file_path": state["csv_file_path"],
-                "source_data": state.get("source_data", {})
+                "source_data": state.get("source_data", {}),
+                "unedited_csv_path": unedited_csv_path
             },
             goto="csv_verifier"
         )
@@ -735,6 +767,29 @@ def create_csv_edit_supervisor_agent(verbose=False):
             if not user_request:
                 user_request = state.get("original_request", "")
             
+            # Get the unedited CSV path - it's REQUIRED for verification
+            unedited_csv_path = state.get("unedited_csv_path", "")
+            if not unedited_csv_path:
+                logger.error("[Supervisor] ERROR: Missing required unedited_csv_path for verification")
+                # Create an error message about missing unedited CSV
+                error_message = HumanMessage(
+                    content="CSV verification FAILED: Cannot verify without original unedited CSV for comparison. The unedited_csv_path is required.",
+                    name="csv_verifier"
+                )
+                updated_messages = state["messages"] + [error_message]
+                return Command(
+                    update={
+                        "messages": updated_messages,
+                        "csv_file_path": state["csv_file_path"],
+                        "source_data": state.get("source_data", {}),
+                        "next": "supervisor"  # Explicitly set next to avoid conflicts
+                    },
+                    goto="supervisor"
+                )
+                
+            if verbose:
+                logger.info(f"[Supervisor] Passing unedited CSV path to verifier: {unedited_csv_path}")
+            
             # If still no request, try to extract from messages
             if not user_request:
                 user_message = next((m for m in state["messages"] if isinstance(m, HumanMessage) and not hasattr(m, 'name')), None)
@@ -753,7 +808,8 @@ def create_csv_edit_supervisor_agent(verbose=False):
             verifier_state = {
                 "messages": [],
                 "csv_file_path": state["csv_file_path"],
-                "user_request": user_request
+                "user_request": user_request,
+                "unedited_csv_path": unedited_csv_path
             }
             result = verifier_agent.run(verifier_state)
             if verbose:
@@ -1069,7 +1125,8 @@ class CSVEditSupervisorAgent:
                 "last_active_node": "",
                 "interrupt_message": None,
                 "thread_id": thread_id,
-                "in_clarification_mode": existing_in_clarification_mode  # Preserve existing clarification mode
+                "in_clarification_mode": existing_in_clarification_mode,  # Preserve existing clarification mode
+                "unedited_csv_path": state.get("unedited_csv_path", "")  # Preserve the unedited CSV path from the state
             }
             
             # Debug log the initial state values
@@ -1218,6 +1275,16 @@ class CSVEditSupervisorAgent:
                         result["in_clarification_mode"] = supervisor_state.get("in_clarification_mode")
                     if "is_request_clarified" not in result and supervisor_state.get("is_request_clarified"):
                         result["is_request_clarified"] = supervisor_state.get("is_request_clarified")
+                    
+                    # Delete the unedited CSV file since the workflow is complete
+                    unedited_csv_path = supervisor_state.get("unedited_csv_path", "")
+                    if unedited_csv_path and os.path.exists(unedited_csv_path):
+                        try:
+                            os.remove(unedited_csv_path)
+                            if self.verbose:
+                                logger.info(f"[Supervisor] Deleted temporary unedited CSV file: {unedited_csv_path}")
+                        except Exception as e:
+                            logger.error(f"[Supervisor] Error deleting unedited CSV file {unedited_csv_path}: {e}")
                         
                     break
             
@@ -1328,7 +1395,8 @@ class CSVEditSupervisorAgent:
                 "needs_input": False,
                 "interrupt_message": None,
                 "verification_failure": "",
-                "next": state.get("next", "request_clarifier")
+                "next": state.get("next", "request_clarifier"),
+                "unedited_csv_path": state.get("unedited_csv_path", "")  # Preserve the unedited CSV path
             }
             
             # Execute the graph with the prepared state

@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 class WorkflowState(TypedDict):
     file_path: str
     target_columns: List[str]
+    schema: Optional[Dict[str, Any]]  # Added schema to state type
     potential_headers: Optional[List[str]]
     column_descriptions: Optional[Dict[str, Dict[str, Any]]]
     matches: Optional[Dict[str, Dict[str, str]]]
@@ -88,22 +89,31 @@ def create_workflow() -> StateGraph:
     return workflow
 
 # Function to run the workflow
-def run_workflow(file_path: str, target_columns: List[str], skip_suggestion: bool = False) -> Dict[str, Any]:
+def run_workflow(file_path: str, target_columns: List[str], schema: Optional[Dict[str, Any]] = None, skip_suggestion: bool = False) -> Dict[str, Any]:
     """
     Run the workflow with the given inputs.
     
     Args:
         file_path: The path to the Excel file
         target_columns: A list of target column names
+        schema: Optional schema information for target columns
         skip_suggestion: Whether to skip the suggestion step
         
     Returns:
         The final state of the workflow
     """
+    # Debug logging to track schema availability
+    if schema:
+        logger.info(f"WORKFLOW DEBUG: Running workflow with schema containing {len(schema.get('properties', {}))} properties")
+        logger.info(f"WORKFLOW DEBUG: Schema properties: {list(schema.get('properties', {}).keys())}")
+    else:
+        logger.info("WORKFLOW DEBUG: No schema provided to workflow")
+    
     # Create the initial state
     initial_state: WorkflowState = {
         "file_path": file_path,
         "target_columns": target_columns,
+        "schema": schema,  # Add schema to initial state
         "potential_headers": None,
         "column_descriptions": None,
         "matches": None,
@@ -117,6 +127,9 @@ def run_workflow(file_path: str, target_columns: List[str], skip_suggestion: boo
         "error": None
     }
     
+    # Verify schema was included in initial state
+    logger.info(f"WORKFLOW DEBUG: Initial state has schema: {schema is not None}")
+    
     # Create the workflow
     workflow = create_workflow()
     
@@ -129,8 +142,12 @@ def run_workflow(file_path: str, target_columns: List[str], skip_suggestion: boo
             # Run the workflow up to the sample data extraction step
             # First extract headers
             state = header_extractor_agent.run(initial_state)
+            # Log state after header extraction to debug schema persistence
+            logger.info(f"WORKFLOW DEBUG: After header extraction, state has schema: {state.get('schema') is not None}")
             # Then describe columns
             state = column_description_agent.run(state)
+            # Log state after column description to debug schema persistence
+            logger.info(f"WORKFLOW DEBUG: After column description, state has schema: {state.get('schema') is not None}")
             # Then match headers
             state = header_matching_agent.run(state)
             # Then extract sample data

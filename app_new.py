@@ -3,17 +3,23 @@ import json
 import logging
 import subprocess
 import time
+import uuid
 import numpy as np
 from langchain_core.messages import AIMessage
 from agents.csv_edit_agent import CSVEditAgent
 import tempfile
 import os
 from langchain_core.messages import HumanMessage
-from flask import Flask, render_template, request, jsonify, session
+from flask import Flask, render_template, request, jsonify, session, send_file
+from eppo_lookup import EPPOLookup
+from utils.commodity_filter import get_commodity_filter
 from werkzeug.utils import secure_filename
 import tempfile
 from dotenv import load_dotenv
 import pandas as pd
+
+# Import schema builder module
+import schema_builder
 
 # Custom JSON encoder to handle NaN values
 class NpEncoder(json.JSONEncoder):
@@ -124,9 +130,9 @@ def generate_schema():
         logger.error(f"Error generating schema: {e}")
         return jsonify({'error': str(e)})
 
-@app.route('/save_schema', methods=['POST'])
-def save_schema():
-    """API endpoint to save an edited schema"""
+@app.route('/save_temp_schema', methods=['POST'])
+def save_temp_schema():
+    """API endpoint to save a temporary edited schema to the session"""
     try:
         data = request.json
         schema = data.get('schema')
@@ -170,10 +176,47 @@ def extract_pdf():
         return jsonify({'error': 'File must be a PDF'})
 
     try:
-        # Get the schema path from session
-        schema_filepath = session.get('schema_filepath')
-        if not schema_filepath or not os.path.exists(schema_filepath):
-            return jsonify({'error': 'No schema found. Please generate a schema first.'})
+        # Check for schema data in the request first (new flow), then fall back to session (old flow)
+        schema_data = None
+        schema_filepath = None
+        
+        # New flow: Check if schema is provided directly in the request
+        if 'schema' in request.form:
+            try:
+                schema_data = json.loads(request.form.get('schema'))
+                logger.info(f"Using schema from request form with {len(schema_data.get('properties', {}))} properties")
+                
+                # Create a temporary schema file for the agent
+                schema_filename = f"temp_schema_{int(time.time())}.json"
+                schema_filepath = os.path.join(app.config['UPLOAD_FOLDER'], schema_filename)
+                
+                with open(schema_filepath, 'w') as f:
+                    json.dump(schema_data, f, indent=2)
+                    
+                logger.info(f"Created temporary schema file: {schema_filepath}")
+                
+            except json.JSONDecodeError as e:
+                logger.error(f"Error parsing schema JSON: {e}")
+                return jsonify({'error': 'Invalid schema format'})
+        else:
+            # Old flow: Get the schema path from session
+            schema_filepath = session.get('schema_filepath')
+            if not schema_filepath or not os.path.exists(schema_filepath):
+                return jsonify({'error': 'No schema found. Please generate a schema first.'})
+            
+            # Load schema data from file
+            with open(schema_filepath, 'r') as f:
+                schema_obj = json.load(f)
+            
+            # Extract just the schema part if it's wrapped with metadata
+            if 'schema' in schema_obj:
+                schema_data = schema_obj['schema']
+                logger.info(f"Extracted schema from wrapper object")
+            else:
+                schema_data = schema_obj
+                logger.info(f"Using schema data directly (no wrapper)")
+            
+            logger.info(f"Using schema from session with {len(schema_data.get('properties', {}))} properties")
 
         # Save the PDF file temporarily
         pdf_filename = secure_filename(pdf_file.filename)
@@ -200,21 +243,12 @@ def extract_pdf():
         session['filename'] = pdf_filename
         session['pdf_filepath'] = pdf_filepath
         session['extracted_data'] = extracted_data
-
-        # Store the extracted data in session
-        session['filename'] = pdf_filename
-        session['pdf_filepath'] = pdf_filepath
-        session['extracted_data'] = extracted_data
         session['schema_filepath'] = schema_filepath
-
-        # Get the schema content
-        with open(schema_filepath, 'r') as f:
-            schema_content = json.load(f)
         
         # Generate column descriptions from schema
         column_descriptions = {}
-        if 'properties' in schema_content:
-            for field, props in schema_content['properties'].items():
+        if 'properties' in schema_data:
+            for field, props in schema_data['properties'].items():
                 description = props.get('description', f"Data extracted from PDF for {field}")
                 data_type = props.get('type', 'string')
                 column_descriptions[field] = {
@@ -294,27 +328,548 @@ def get_target_columns():
         else:
             # Use the first sheet if none specified
             excel_file = pd.ExcelFile(filepath)
+            if not excel_file.sheet_names:
+                # Clean up
+                os.remove(filepath)
+                return jsonify({'error': 'No sheets found in the Excel file'})
+            
             sheet_name = excel_file.sheet_names[0]
             df = pd.read_excel(filepath, sheet_name=sheet_name, header=None)
+
+        # Check if DataFrame is empty
+        if df.empty or len(df) == 0:
+            # Clean up
+            os.remove(filepath)
+            return jsonify({'error': 'The selected sheet is empty or contains no data'})
 
         # Try to find the header row
         from utils.common import infer_header_row
         header_index = infer_header_row(df)
-        if header_index is not None:
+        if header_index is not None and header_index < len(df):
             # Extract headers from the inferred header row
             headers = df.iloc[header_index].astype(str).tolist()
             target_columns = [h.strip() for h in headers if h.strip()]
         else:
             # If no header row found, use the first row
-            headers = df.iloc[0].astype(str).tolist()
-            target_columns = [h.strip() for h in headers if h.strip()]
+            if len(df) > 0:
+                headers = df.iloc[0].astype(str).tolist()
+                target_columns = [h.strip() for h in headers if h.strip()]
+            else:
+                # Clean up
+                os.remove(filepath)
+                return jsonify({'error': 'No data found in the sheet'})
 
         # Clean up
         os.remove(filepath)
 
+        # Ensure we have valid target columns
+        if not target_columns:
+            return jsonify({'error': 'No valid column headers found in the sheet'})
+
         return jsonify({'target_columns': target_columns})
     except Exception as e:
         logger.error(f"Error getting target columns: {e}")
+        # Clean up if file exists
+        try:
+            if 'filepath' in locals() and os.path.exists(filepath):
+                os.remove(filepath)
+        except:
+            pass
+        return jsonify({'error': str(e)})
+
+@app.route('/create_schema', methods=['POST'])
+def create_schema():
+    """API endpoint to generate initial schema for target columns"""
+    try:
+        # Target columns can come from form or be extracted from target file
+        target_columns_list = []
+        target_file_path = None
+        
+        logger.info(f"create_schema called with form keys: {list(request.form.keys())}")
+        logger.info(f"create_schema called with files keys: {list(request.files.keys())}")
+        
+        # Get target columns from form if provided
+        if 'target_columns' in request.form:
+            target_columns = request.form.get('target_columns', '')
+            target_columns_list = [col.strip() for col in target_columns.split(',') if col.strip()]
+            logger.info(f"Target columns from form: {target_columns_list}")
+        
+        # If target file is provided, use it for schema generation
+        if 'target_file' in request.files:
+            target_file = request.files['target_file']
+            target_sheet_name = request.form.get('target_sheet_name', '')
+            
+            logger.info(f"Target file provided: {target_file.filename}, sheet: {target_sheet_name}")
+            
+            # Save target file temporarily
+            target_filename = secure_filename(target_file.filename)
+            target_file_path = os.path.join(app.config['UPLOAD_FOLDER'], f"temp_target_{target_filename}")
+            target_file.save(target_file_path)
+            logger.info(f"Target file saved to: {target_file_path}")
+            
+            try:
+                # Extract target columns from file if we don't have them already
+                if not target_columns_list:
+                    from utils.common import infer_header_row
+                    if target_sheet_name:
+                        target_df = pd.read_excel(target_file_path, sheet_name=target_sheet_name, header=None)
+                    else:
+                        # Use the first sheet if none specified
+                        target_excel_file = pd.ExcelFile(target_file_path)
+                        target_sheet_name = target_excel_file.sheet_names[0]
+                        target_df = pd.read_excel(target_file_path, sheet_name=target_sheet_name, header=None)
+                    
+                    # Find header row and extract column names
+                    header_index = infer_header_row(target_df)
+                    if header_index is not None:
+                        headers = target_df.iloc[header_index].astype(str).tolist()
+                    else:
+                        headers = target_df.iloc[0].astype(str).tolist()
+                    
+                    target_columns_list = [h.strip() for h in headers if h.strip()]
+                    logger.info(f"Extracted target columns from file: {target_columns_list}")
+            except Exception as e:
+                logger.error(f"Error extracting target columns from file: {e}")
+                # Clean up
+                if os.path.exists(target_file_path):
+                    os.remove(target_file_path)
+                return jsonify({'error': f'Error extracting target columns: {str(e)}'})
+        
+        if not target_columns_list:
+            return jsonify({'error': 'No target columns provided'})
+        
+        try:
+            logger.info(f"Generating schema with {len(target_columns_list)} columns, using file: {target_file_path}")
+            
+            # Get existing schema from session if available to preserve explicit type specifications
+            existing_schema = session.get('temp_schema') or session.get('schema')
+            if existing_schema:
+                logger.info(f"Found existing schema with {len(existing_schema.get('properties', {}))} properties, will preserve explicit types")
+            
+            # Generate schema from target file if available, otherwise just use columns
+            schema = schema_builder.create_initial_schema(
+                target_columns_list,
+                target_file_path,  # Use the target file path, not the source file
+                request.form.get('target_sheet_name', ''),  # Use target sheet name
+                existing_schema  # Pass existing schema to preserve explicit types
+            )
+            
+            # Log the schema
+            logger.info(f"Generated schema with {len(schema.get('properties', {}))} properties")
+            
+            # Store in session in both keys to ensure consistency
+            session['temp_schema'] = schema
+            session['schema'] = schema  # Store in both keys
+            
+            # Log schema creation
+            logger.info(f"SCHEMA DEBUG: Generated schema with {len(schema.get('properties', {}))} properties")
+            logger.info(f"SCHEMA DEBUG: Schema properties: {list(schema.get('properties', {}).keys())}")
+            
+            # Clean up if needed
+            if target_file_path and os.path.exists(target_file_path):
+                os.remove(target_file_path)
+                logger.info(f"Removed temporary target file: {target_file_path}")
+            
+            return jsonify({
+                'success': True,
+                'schema': schema
+            })
+            
+        except Exception as e:
+            logger.error(f"Error creating schema: {e}")
+            # Clean up
+            if target_file_path and os.path.exists(target_file_path):
+                os.remove(target_file_path)
+            return jsonify({'error': str(e)})
+    
+    except Exception as e:
+        logger.error(f"Error in create_schema: {e}")
+        return jsonify({'error': str(e)})
+
+@app.route('/save_schema', methods=['POST'])
+def save_schema_endpoint():
+    """API endpoint to save a schema with a name"""
+    try:
+        data = request.json
+        schema_data = data.get('schema')
+        schema_name = data.get('name', 'Unnamed Schema')
+        
+        logger.info(f"Saving schema with name: {schema_name}")
+        logger.info(f"Current working directory: {os.getcwd()}")
+        logger.info(f"Schema directory: {os.path.abspath(schema_builder.SCHEMA_DIR)}")
+        
+        # Check if schema directory exists and is writable
+        if not os.path.exists(schema_builder.SCHEMA_DIR):
+            logger.warning(f"Schema directory does not exist, creating: {schema_builder.SCHEMA_DIR}")
+            try:
+                os.makedirs(schema_builder.SCHEMA_DIR, exist_ok=True)
+                logger.info(f"Created schema directory: {schema_builder.SCHEMA_DIR}")
+            except Exception as dir_err:
+                logger.error(f"Failed to create schema directory: {dir_err}", exc_info=True)
+                return jsonify({'error': f'Failed to create schema directory: {str(dir_err)}'})
+        else:
+            # Check if directory is writable
+            if not os.access(schema_builder.SCHEMA_DIR, os.W_OK):
+                logger.error(f"Schema directory exists but is not writable: {schema_builder.SCHEMA_DIR}")
+                # Try to fix permissions
+                try:
+                    os.chmod(schema_builder.SCHEMA_DIR, 0o777)  # Full permissions
+                    logger.info(f"Set permissions on schema directory to 777")
+                except Exception as perm_err:
+                    logger.error(f"Failed to set permissions: {perm_err}", exc_info=True)
+                    return jsonify({'error': f'Schema directory is not writable: {str(perm_err)}'})
+        
+        if not schema_data:
+            logger.error("No schema data provided in save_schema_endpoint")
+            return jsonify({'error': 'No schema data provided'})
+        
+        # Log what we received for debugging
+        logger.info(f"Received schema data type: {type(schema_data)}")
+        if isinstance(schema_data, dict):
+            logger.info(f"Schema data keys: {list(schema_data.keys())}")
+            if 'properties' in schema_data:
+                logger.info(f"Schema has {len(schema_data['properties'])} properties")
+            else:
+                logger.warning("Schema data does not have 'properties' key")
+        
+        # The schema_builder.save_schema function now handles unwrapping if needed
+        # But let's ensure we're passing the right data
+        if isinstance(schema_data, dict) and 'schema' in schema_data:
+            logger.info("Schema data appears to be wrapped, using wrapped data as-is")
+            # The save_schema function will extract it properly
+        elif isinstance(schema_data, dict) and 'properties' in schema_data:
+            logger.info("Schema data appears to be unwrapped schema")
+        else:
+            logger.warning(f"Unexpected schema data format: {schema_data}")
+        
+        # Save schema - the save_schema function will handle extraction/validation
+        logger.info(f"Calling schema_builder.save_schema with schema data")
+        result = schema_builder.save_schema(schema_data, schema_name)
+        
+        # Log the result
+        if result.get('success'):
+            logger.info(f"Schema saved successfully with ID: {result.get('id')}")
+            
+            # Verify the file actually exists
+            expected_file_path = os.path.join(schema_builder.SCHEMA_DIR, f"{result.get('id')}.json")
+            if os.path.exists(expected_file_path):
+                file_size = os.path.getsize(expected_file_path)
+                logger.info(f"Verified schema file exists: {expected_file_path} ({file_size} bytes)")
+                
+                # Also verify the content is correct by reading it back
+                try:
+                    with open(expected_file_path, 'r') as f:
+                        saved_content = json.load(f)
+                    
+                    if 'schema' in saved_content and 'properties' in saved_content['schema']:
+                        num_properties = len(saved_content['schema']['properties'])
+                        logger.info(f"Verified saved schema has {num_properties} properties")
+                    else:
+                        logger.warning("Saved schema file has unexpected format")
+                except Exception as read_err:
+                    logger.error(f"Error reading back saved schema: {read_err}")
+            else:
+                logger.error(f"Schema file does not exist after save: {expected_file_path}")
+                return jsonify({
+                    'error': f'Schema file not found after save. This may be a permission issue.',
+                    'details': {
+                        'expected_path': expected_file_path,
+                        'schema_dir': schema_builder.SCHEMA_DIR,
+                        'schema_id': result.get('id')
+                    }
+                })
+        else:
+            logger.error(f"Schema save failed: {result.get('error')}")
+        
+        # List schemas after save to verify the schema appears in the list
+        try:
+            schemas = schema_builder.list_saved_schemas()
+            logger.info(f"After save: found {len(schemas)} schemas in directory")
+            for i, schema in enumerate(schemas):
+                logger.info(f"  Schema {i+1}: ID={schema.get('id')}, Name={schema.get('name')}")
+        except Exception as list_err:
+            logger.error(f"Error listing schemas after save: {list_err}", exc_info=True)
+        
+        return jsonify(result)
+    
+    except Exception as e:
+        logger.error(f"Error saving schema: {e}", exc_info=True)
+        return jsonify({'error': str(e)})
+
+@app.route('/list_schemas', methods=['GET'])
+def list_schemas():
+    """API endpoint to list all saved schemas with optional mode filtering"""
+    try:
+        # Get the mode parameter from query string (pdf or excel)
+        mode = request.args.get('mode', '').lower()
+        logger.info(f"Listing saved schemas for mode: {mode}")
+        
+        # Let's manually check the schemas directory to help with debugging
+        schema_dir = os.path.abspath(schema_builder.SCHEMA_DIR)
+        logger.info(f"Using schema directory absolute path: {schema_dir}")
+        
+        # Check if directory exists and is accessible
+        if not os.path.exists(schema_dir):
+            logger.error(f"Schema directory does not exist: {schema_dir}")
+            return jsonify({
+                'success': False,
+                'error': f'Schema directory does not exist: {schema_dir}'
+            })
+        
+        # Check if directory is readable
+        if not os.access(schema_dir, os.R_OK):
+            logger.error(f"Schema directory is not readable: {schema_dir}")
+            return jsonify({
+                'success': False,
+                'error': f'Schema directory is not readable: {schema_dir}'
+            })
+        
+        # List directory contents and apply filtering
+        try:
+            dir_contents = os.listdir(schema_dir)
+            json_files = [f for f in dir_contents if f.endswith('.json')]
+            logger.info(f"Directory listing: Found {len(dir_contents)} items in schema directory, {len(json_files)} JSON files")
+            
+            # Load and filter schemas based on mode
+            filtered_schemas = []
+            for filename in json_files:
+                file_path = os.path.join(schema_dir, filename)
+                try:
+                    if os.path.isfile(file_path):
+                        with open(file_path, 'r') as f:
+                            schema_obj = json.load(f)
+                        
+                        # Extract metadata
+                        schema_id = schema_obj.get("id", os.path.splitext(filename)[0])
+                        schema_name = schema_obj.get("name", "Unnamed schema")
+                        timestamp = schema_obj.get("timestamp", "")
+                        is_array_schema = schema_obj.get("is_array_of_objects", False)
+                        
+                        # Apply mode-based filtering
+                        should_include = True
+                        if mode == 'excel':
+                            # Excel mode: exclude array of objects schemas
+                            should_include = not is_array_schema
+                        elif mode == 'pdf':
+                            # PDF mode: include all schemas (both regular and array)
+                            should_include = True
+                        # If no mode specified, include all schemas
+                        
+                        if should_include:
+                            schema_info = {
+                                "id": schema_id,
+                                "name": schema_name,
+                                "timestamp": timestamp,
+                                "is_array_of_objects": is_array_schema
+                            }
+                            
+                            # Add array config if available
+                            if is_array_schema and "array_config" in schema_obj:
+                                schema_info["array_config"] = schema_obj["array_config"]
+                            
+                            filtered_schemas.append(schema_info)
+                            logger.info(f"Included schema: ID={schema_id}, Name={schema_name}, Array={is_array_schema}")
+                        else:
+                            logger.info(f"Filtered out schema: ID={schema_id}, Name={schema_name}, Array={is_array_schema} (mode={mode})")
+                            
+                except Exception as e:
+                    logger.error(f"Error reading schema file {filename}: {e}", exc_info=True)
+            
+            # Sort by timestamp (newest first)
+            filtered_schemas.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+            
+            logger.info(f"Returning {len(filtered_schemas)} filtered schemas for mode '{mode}'")
+            
+            return jsonify({
+                'success': True,
+                'schemas': filtered_schemas
+            })
+            
+        except Exception as e:
+            logger.error(f"Error listing directory contents: {e}", exc_info=True)
+            return jsonify({
+                'success': False,
+                'error': f'Error listing directory contents: {str(e)}'
+            })
+    
+    except Exception as e:
+        logger.error(f"Error listing schemas: {e}", exc_info=True)
+        return jsonify({'error': str(e)})
+
+@app.route('/load_schema/<schema_id>', methods=['GET'])
+def load_schema(schema_id):
+    """API endpoint to load a specific schema"""
+    try:
+        result = schema_builder.load_schema(schema_id)
+        return jsonify(result)
+    
+    except Exception as e:
+        logger.error(f"Error loading schema: {e}")
+        return jsonify({'error': str(e)})
+
+@app.route('/delete_schema/<schema_id>', methods=['DELETE'])
+def delete_schema(schema_id):
+    """API endpoint to delete a schema"""
+    try:
+        logger.info(f"Delete schema request received for schema_id: {schema_id}")
+        
+        # Clean the schema ID to prevent issues
+        schema_id = schema_id.strip()
+        
+        # First check if the schema exists
+        file_path = os.path.join(schema_builder.SCHEMA_DIR, f"{schema_id}.json")
+        if not os.path.exists(file_path):
+            logger.error(f"Schema file not found for deletion: {file_path}")
+            
+            # List available schemas for debugging
+            if os.path.exists(schema_builder.SCHEMA_DIR):
+                available_schemas = os.listdir(schema_builder.SCHEMA_DIR)
+                logger.info(f"Available schema files in directory: {available_schemas}")
+            else:
+                logger.error(f"Schema directory does not exist: {schema_builder.SCHEMA_DIR}")
+            
+            return jsonify({
+                'success': False,
+                'error': f"Schema with ID {schema_id} not found at {file_path}"
+            })
+        
+        # If the schema exists, attempt to delete it
+        logger.info(f"Attempting to delete schema file: {file_path}")
+        result = schema_builder.delete_schema(schema_id)
+        
+        # Log the result for debugging
+        if result.get('success'):
+            logger.info(f"Schema deletion successful: {schema_id}")
+        else:
+            logger.error(f"Schema deletion failed: {result.get('error')}")
+        
+        return jsonify(result)
+    
+    except Exception as e:
+        logger.error(f"Error in delete_schema endpoint: {e}", exc_info=True)
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        })
+
+@app.route('/download_schema/<schema_id>', methods=['GET'])
+def download_schema(schema_id):
+    """API endpoint to download a schema as JSON"""
+    try:
+        result = schema_builder.load_schema(schema_id)
+        
+        if not result.get('success', False):
+            return jsonify({'error': result.get('error', 'Schema not found')})
+        
+        schema_data = result.get('schema', {})
+        schema_name = result.get('name', 'schema')
+        
+        # Create response with JSON file
+        from flask import Response
+        response = Response(
+            json.dumps(schema_data, indent=2),
+            mimetype='application/json',
+            headers={
+                'Content-Disposition': f'attachment; filename={schema_name}.json'
+            }
+        )
+        
+        return response
+    
+    except Exception as e:
+        logger.error(f"Error downloading schema: {e}")
+        return jsonify({'error': str(e)})
+
+@app.route('/upload_schema', methods=['POST'])
+def upload_schema():
+    """API endpoint to upload and process a schema from JSON file"""
+    try:
+        if 'schema_file' not in request.files:
+            return jsonify({'error': 'No schema file provided'})
+        
+        schema_file = request.files['schema_file']
+        
+        if schema_file.filename == '':
+            return jsonify({'error': 'No selected file'})
+        
+        if not schema_file.filename.endswith('.json'):
+            return jsonify({'error': 'File must be a JSON file'})
+        
+        try:
+            # Read the JSON file
+            schema_data = json.load(schema_file)
+            
+            # Validate schema
+            validation = schema_builder.validate_schema(schema_data)
+            if not validation.get('valid', False):
+                return jsonify({'error': f'Invalid schema: {validation.get("error", "Unknown error")}'})
+            
+            # Store in session in both keys to ensure consistency
+            session['temp_schema'] = schema_data
+            session['schema'] = schema_data  # Add to both keys
+            
+            # Log schema upload
+            logger.info(f"SCHEMA DEBUG: Schema uploaded and stored in session")
+            logger.info(f"SCHEMA DEBUG: Schema has {len(schema_data.get('properties', {}))} properties")
+            logger.info(f"SCHEMA DEBUG: Schema properties: {list(schema_data.get('properties', {}).keys())}")
+            
+            return jsonify({
+                'success': True,
+                'schema': schema_data
+            })
+            
+        except json.JSONDecodeError:
+            return jsonify({'error': 'Invalid JSON file'})
+        
+    except Exception as e:
+        logger.error(f"Error uploading schema: {e}")
+        return jsonify({'error': str(e)})
+
+@app.route('/update_schema_required', methods=['POST'])
+def update_schema_required():
+    """API endpoint to update the required status of a column in the current schema"""
+    try:
+        data = request.json
+        column_name = data.get('column_name')
+        is_required = data.get('is_required', False)
+        current_schema_from_frontend = data.get('current_schema')
+        
+        if not column_name:
+            return jsonify({'error': 'Column name not provided'})
+        
+        # Use the schema from frontend if provided (includes all local changes)
+        # Otherwise fall back to session schema
+        if current_schema_from_frontend:
+            current_schema = current_schema_from_frontend
+            logger.info(f"Using schema from frontend with {len(current_schema.get('properties', {}))} properties")
+        else:
+            current_schema = session.get('temp_schema') or session.get('schema')
+            logger.info(f"Using schema from session with {len(current_schema.get('properties', {}))} properties")
+        
+        if not current_schema:
+            return jsonify({'error': 'No active schema found'})
+        
+        logger.info(f"Updating required status for column '{column_name}' to {is_required}")
+        
+        # Use the new schema format function to update the required status
+        updated_schema = schema_builder.update_schema_required_status(
+            current_schema, column_name, is_required
+        )
+        
+        # Update the schema in session to keep it synchronized
+        session['temp_schema'] = updated_schema
+        session['schema'] = updated_schema
+        
+        logger.info(f"Schema updated successfully. Required columns: {updated_schema.get('required', [])}")
+        
+        return jsonify({
+            'success': True,
+            'schema': updated_schema,
+            'message': f'Column {column_name} {"is now required" if is_required else "is now optional"}'
+        })
+        
+    except Exception as e:
+        logger.error(f"Error updating schema required status: {e}")
         return jsonify({'error': str(e)})
 
 @app.route('/upload', methods=['POST'])
@@ -395,6 +950,15 @@ def upload_file():
         file.seek(0)  # Reset file pointer to beginning
         file.save(temp_file_path)
         
+        # Check if a schema is available in the session
+        schema = None
+        if 'temp_schema' in session:
+            schema = session.get('temp_schema')
+            logger.info(f"Using schema from session['temp_schema'] with {len(schema.get('properties', {}))} properties")
+        elif 'schema' in session:
+            schema = session.get('schema')
+            logger.info(f"Using schema from session['schema'] with {len(schema.get('properties', {}))} properties")
+        
         # Process the file with the selected sheet if provided
         if sheet_name:
             # Read only the selected sheet
@@ -409,16 +973,26 @@ def upload_file():
                 # Store the sheet name in session for later use
                 session['selected_sheet'] = sheet_name
                 
-                # Process the single-sheet file
-                results = run_workflow(temp_sheet_path, target_columns_list, skip_suggestion=True)
+                # Process the single-sheet file with schema if available
+                if schema:
+                    logger.info(f"Running workflow with schema (sheet-specific) for columns: {target_columns_list}")
+                    results = run_workflow(temp_sheet_path, target_columns_list, schema=schema, skip_suggestion=True)
+                else:
+                    logger.info(f"Running workflow without schema (sheet-specific)")
+                    results = run_workflow(temp_sheet_path, target_columns_list, skip_suggestion=True)
                 
                 # Clean up
                 os.remove(temp_sheet_path)
             else:
                 return jsonify({'error': f'Sheet "{sheet_name}" not found in the Excel file'})
         else:
-            # Process the entire file
-            results = run_workflow(temp_file_path, target_columns_list, skip_suggestion=True)
+            # Process the entire file with schema if available
+            if schema:
+                logger.info(f"Running workflow with schema for columns: {target_columns_list}")
+                results = run_workflow(temp_file_path, target_columns_list, schema=schema, skip_suggestion=True)
+            else:
+                logger.info(f"Running workflow without schema")
+                results = run_workflow(temp_file_path, target_columns_list, skip_suggestion=True)
         
         # Get Excel preview
         excel_preview = get_excel_preview(temp_file_path)
@@ -624,8 +1198,16 @@ def re_match():
         # Create a list with just the one target column
         single_target = [target_column]
         
-        # Run the workflow for just this target column
-        results = run_workflow(temp_file_path, single_target)
+        # Get schema from session if available
+        schema = session.get('temp_schema')
+        
+        # Run the workflow for just this target column with schema if available
+        if schema:
+            logger.info(f"Re-matching with schema containing properties: {list(schema.get('properties', {}).keys())}")
+            results = run_workflow(temp_file_path, single_target, schema=schema)
+        else:
+            logger.info("Re-matching without schema")
+            results = run_workflow(temp_file_path, single_target)
         
         if results.get('error'):
             return jsonify({'error': results['error']})
@@ -669,8 +1251,16 @@ def suggest_header():
         # Get the column description if available
         column_description = column_descriptions.get(target_column)
         
-        # Run the workflow for just this target column
-        results = run_workflow(temp_file_path, [target_column])
+        # Get schema from session if available
+        schema = session.get('temp_schema')
+        
+        # Run the workflow for just this target column with schema if available
+        if schema:
+            logger.info(f"Suggesting header with schema containing properties: {list(schema.get('properties', {}).keys())}")
+            results = run_workflow(temp_file_path, [target_column], schema=schema)
+        else:
+            logger.info("Suggesting header without schema")
+            results = run_workflow(temp_file_path, [target_column])
         
         if results.get('error'):
             return jsonify({'error': results['error']})
@@ -721,8 +1311,16 @@ def suggest_sample_data():
         # Check if this target column has a match
         has_match = target_column in matches and matches[target_column].get('match') != "No match found"
         
-        # Run the workflow for just this target column
-        results = run_workflow(temp_file_path, [target_column])
+        # Get schema from session if available
+        schema = session.get('temp_schema')
+        
+        # Run the workflow for just this target column with schema if available
+        if schema:
+            logger.info(f"Suggesting sample data with schema containing properties: {list(schema.get('properties', {}).keys())}")
+            results = run_workflow(temp_file_path, [target_column], schema=schema)
+        else:
+            logger.info("Suggesting sample data without schema")
+            results = run_workflow(temp_file_path, [target_column])
         
         if results.get('error'):
             return jsonify({'error': results['error']})
@@ -765,8 +1363,16 @@ def re_analyze_all():
         if not os.path.exists(temp_file_path):
             return jsonify({'error': 'Temporary file no longer available'})
         
-        # Run the workflow
-        results = run_workflow(temp_file_path, target_columns)
+        # Get schema from session if available
+        schema = session.get('temp_schema')
+        
+        # Run the workflow with schema if available
+        if schema:
+            logger.info(f"Re-analyzing all with schema containing properties: {list(schema.get('properties', {}).keys())}")
+            results = run_workflow(temp_file_path, target_columns, schema=schema)
+        else:
+            logger.info("Re-analyzing all without schema")
+            results = run_workflow(temp_file_path, target_columns)
         
         if results.get('error'):
             return jsonify({'error': results['error']})
@@ -981,27 +1587,183 @@ def download_csv():
         # Check if we're in PDF mode or Excel mode
         extracted_data = session.get('extracted_data')
         if extracted_data:
-            # PDF mode - export the extracted data
+            # PDF mode - export the extracted data with proper array handling
             from io import StringIO
             import csv
             
             output = StringIO()
             writer = csv.writer(output)
             
-            # Write header row with field names
-            fields = list(extracted_data.keys())
-            writer.writerow(fields)
+            # Check if this is array of objects data
+            schema_filepath = session.get('schema_filepath', '')
+            is_array_schema = False
+            array_field_name = None
             
-            # Write a single row with all values
-            row_data = []
-            for field in fields:
-                value = extracted_data.get(field, '')
-                # Convert complex values to string
-                if isinstance(value, (list, dict)):
-                    value = json.dumps(value)
-                row_data.append(value)
+            if schema_filepath and os.path.exists(schema_filepath):
+                try:
+                    with open(schema_filepath, 'r') as f:
+                        schema = json.load(f)
+                    
+                    # Check if this is an array of objects schema
+                    is_array_schema = schema_builder.is_array_of_object_schema(schema)
+                    if is_array_schema:
+                        array_field_name = next(iter(schema['properties'].keys()))
+                        logger.info(f"Detected array of objects schema with field: {array_field_name}")
+                except Exception as e:
+                    logger.error(f"Error reading schema: {e}")
             
-            writer.writerow(row_data)
+            if is_array_schema and array_field_name and array_field_name in extracted_data:
+                # Handle array of objects data
+                array_data = extracted_data[array_field_name]
+                if isinstance(array_data, list) and len(array_data) > 0:
+                    # Get headers from the first object and ensure all objects have all keys
+                    all_keys = set()
+                    for obj in array_data:
+                        if isinstance(obj, dict):
+                            all_keys.update(obj.keys())
+                    
+                    headers = sorted(list(all_keys))  # Sort for consistent order
+                    writer.writerow(headers)
+                    
+                    # Get user commodity selections and find commodity code column
+                    commodity_selections = session.get('commodity_selections', {})
+                    commodity_code_col = None
+                    
+                    # Only look for commodity code column if we have selections
+                    if commodity_selections:
+                        for header in headers:
+                            if 'commodity' in header.lower() and 'code' in header.lower():
+                                commodity_code_col = header
+                                logger.info(f"Found commodity code column for CSV export: {commodity_code_col}")
+                                break
+                    
+                    # Write each object as a row
+                    for row_index, obj in enumerate(array_data):
+                        if isinstance(obj, dict):
+                            row_data = []
+                            for header in headers:
+                                value = obj.get(header, '')  # Use empty string if key is missing
+                                
+                                # Only apply commodity code selection if column exists and user has made a selection
+                                if (commodity_code_col and 
+                                    header == commodity_code_col and 
+                                    str(row_index) in commodity_selections and 
+                                    commodity_selections[str(row_index)]['code']):
+                                    value = commodity_selections[str(row_index)]['code']
+                                    logger.info(f"Using user-selected commodity code for row {row_index}: {value}")
+                                
+                                if isinstance(value, (dict, list)):
+                                    value = json.dumps(value)
+                                elif value is None:
+                                    value = ''
+                                row_data.append(str(value))
+                            writer.writerow(row_data)
+                        else:
+                            # If not a dict, create a row with the single value in first column
+                            row_data = [str(obj)] + [''] * (len(headers) - 1)
+                            writer.writerow(row_data)
+                    
+                    logger.info(f"Exported {len(array_data)} objects with {len(headers)} columns")
+                else:
+                    # Empty array or not a list, create headers only
+                    try:
+                        # Get headers from schema
+                        with open(schema_filepath, 'r') as f:
+                            schema = json.load(f)
+                        array_property = schema['properties'][array_field_name]
+                        if 'items' in array_property and 'properties' in array_property['items']:
+                            headers = list(array_property['items']['properties'].keys())
+                            writer.writerow(headers)
+                            logger.info(f"Exported headers only (no data): {headers}")
+                    except Exception as e:
+                        logger.error(f"Error getting headers from schema: {e}")
+                        writer.writerow(['No data available'])
+            else:
+                # Handle regular PDF data (not array of objects)
+                # Get target columns from schema if available, otherwise use extracted field names
+                target_columns = []
+                
+                if schema_filepath and os.path.exists(schema_filepath):
+                    try:
+                        with open(schema_filepath, 'r') as f:
+                            schema = json.load(f)
+                        if 'properties' in schema:
+                            target_columns = list(schema['properties'].keys())
+                            logger.info(f"Using target columns from schema: {target_columns}")
+                    except Exception as e:
+                        logger.error(f"Error reading schema for target columns: {e}")
+                
+                # Use target columns if available, otherwise fallback to extracted field names
+                fields = target_columns if target_columns else list(extracted_data.keys())
+                writer.writerow(fields)
+                
+                # Check if any field contains an array
+                array_fields = [field for field in fields if isinstance(extracted_data.get(field), list)]
+                has_arrays = len(array_fields) > 0
+                
+                if has_arrays:
+                    # Find the maximum array length to determine number of rows
+                    max_rows = 1
+                    for field in array_fields:
+                        if isinstance(extracted_data.get(field), list):
+                            max_rows = max(max_rows, len(extracted_data[field]))
+                    
+                    # Get user commodity selections and find commodity code column
+                    commodity_selections = session.get('commodity_selections', {})
+                    commodity_code_field_index = None
+                    
+                    # Only look for commodity code field if we have selections
+                    if commodity_selections:
+                        for i, field in enumerate(fields):
+                            if 'commodity' in field.lower() and 'code' in field.lower():
+                                commodity_code_field_index = i
+                                logger.info(f"Found commodity code field for CSV export: {field} at index {i}")
+                                break
+                    
+                    # Create rows for array data
+                    for row_index in range(max_rows):
+                        row_data = []
+                        for field_index, field in enumerate(fields):
+                            value = extracted_data.get(field, '')
+                            
+                            # Check if this is the commodity code field and user has made a selection
+                            if (field_index == commodity_code_field_index and 
+                                str(row_index) in commodity_selections and 
+                                commodity_selections[str(row_index)]['code']):
+                                value = commodity_selections[str(row_index)]['code']
+                                logger.info(f"Using user-selected commodity code for row {row_index}: {value}")
+                            elif isinstance(value, list):
+                                # Use array item if available, otherwise empty string
+                                if row_index < len(value):
+                                    value = value[row_index]
+                                else:
+                                    value = ''
+                            else:
+                                # For non-array fields, use the value only in the first row
+                                if row_index == 0:
+                                    if isinstance(value, dict):
+                                        value = json.dumps(value)
+                                    else:
+                                        value = value or ''
+                                else:
+                                    value = ''
+                            
+                            row_data.append(value)
+                        
+                        writer.writerow(row_data)
+                else:
+                    # No arrays, create single row
+                    row_data = []
+                    for field in fields:
+                        value = extracted_data.get(field, '')
+                        # Convert complex values to string
+                        if isinstance(value, dict):
+                            value = json.dumps(value)
+                        elif isinstance(value, list):
+                            value = json.dumps(value)
+                        row_data.append(value)
+                    
+                    writer.writerow(row_data)
         else:
             # Excel mode - use the sample data
             target_columns = session.get('target_columns', [])
@@ -1064,65 +1826,104 @@ def get_csv_data():
         data = request.json
         export_selections = data.get('export_selections', {})
         
-        # Get data from session
+        # Check if we're in PDF mode or Excel mode
+        extracted_data = session.get('extracted_data')
         target_columns = session.get('target_columns', [])
         sample_data = session.get('sample_data', {})
         suggested_data = session.get('suggested_data', {})
         
-        if not target_columns:
-            return jsonify({'error': 'No active analysis session found'})
-        
-        logger.info(f"Getting CSV data for {len(target_columns)} columns")
-        
-        # Collect data for each column based on selections
-        csv_data = {
-            'headers': target_columns,
-            'data': []
-        }
-        
-        # Determine the maximum number of rows and collect column data
-        max_rows = 0
-        column_data = {}
-        
-        for target in target_columns:
-            # Check which data source to use based on export_selections
-            selection = export_selections.get(target, 'sample')
+        # Determine the mode based on available data
+        if extracted_data and not target_columns:
+            # PDF mode with single-row extracted data
+            logger.info("Getting CSV data for PDF mode (single row)")
             
-            if selection == 'ai' and target in suggested_data and suggested_data[target]:
-                # Use AI suggested data if available
-                target_data = suggested_data[target]
-            else:
-                # Default to sample data
-                target_data = sample_data.get(target, [])
-                
-                # If no sample data, create some placeholder data
-                if not target_data:
-                    target_data = ["Sample 1", "Sample 2", "Sample 3"]
+            # Create CSV data from PDF extracted data
+            headers = list(extracted_data.keys())
+            csv_data = {
+                'headers': headers,
+                'data': []
+            }
             
-            # Store the data for this column
-            column_data[target] = target_data
-            max_rows = max(max_rows, len(target_data))
-        
-        # Ensure we have at least one row
-        max_rows = max(1, max_rows)
-        
-        # Build row-oriented data
-        for row_idx in range(max_rows):
+            # Create a single row with all the PDF data
             row = {}
-            for target in target_columns:
-                target_data = column_data[target]
-                row[target] = target_data[row_idx] if row_idx < len(target_data) else ''
+            for field in headers:
+                value = extracted_data.get(field, '')
+                # Convert complex values to string for CSV compatibility
+                if isinstance(value, (list, dict)):
+                    value = json.dumps(value)
+                elif value is None:
+                    value = ''
+                row[field] = str(value)
             
             csv_data['data'].append(row)
-        
-        return jsonify({
-            'success': True,
-            'csv_data': csv_data
-        })
+            
+            logger.info(f"PDF mode CSV data created with {len(headers)} fields")
+            
+            return jsonify({
+                'success': True,
+                'csv_data': csv_data
+            })
+        elif target_columns:
+            # Excel mode OR PDF mode converted to multi-row format
+            if extracted_data:
+                logger.info("Getting CSV data for PDF mode that was converted to multi-row format")
+            else:
+                logger.info(f"Getting CSV data for Excel mode with {len(target_columns)} columns")
+            
+            # Collect data for each column based on selections
+            csv_data = {
+                'headers': target_columns,
+                'data': []
+            }
+            
+            # Determine the maximum number of rows and collect column data
+            max_rows = 0
+            column_data = {}
+            
+            for target in target_columns:
+                # Check which data source to use based on export_selections
+                selection = export_selections.get(target, 'sample')
+                
+                if selection == 'ai' and target in suggested_data and suggested_data[target]:
+                    # Use AI suggested data if available
+                    target_data = suggested_data[target]
+                else:
+                    # Default to sample data
+                    target_data = sample_data.get(target, [])
+                    
+                    # If no sample data, create some placeholder data
+                    if not target_data:
+                        target_data = ["Sample 1", "Sample 2", "Sample 3"]
+                
+                # Store the data for this column
+                column_data[target] = target_data
+                max_rows = max(max_rows, len(target_data))
+            
+            # Ensure we have at least one row
+            max_rows = max(1, max_rows)
+            
+            # Build row-oriented data
+            for row_idx in range(max_rows):
+                row = {}
+                for target in target_columns:
+                    target_data = column_data[target]
+                    row[target] = target_data[row_idx] if row_idx < len(target_data) else ''
+                
+                csv_data['data'].append(row)
+            
+            return jsonify({
+                'success': True,
+                'csv_data': csv_data
+            })
+        else:
+            # No active session found
+            return jsonify({'error': 'No active analysis session found'})
     
     except Exception as e:
         logger.error(f"Error getting CSV data: {e}")
         return jsonify({'error': str(e)})
+
+
 
 @app.route('/chat_with_csv_editor', methods=['POST'])
 def chat_with_csv_editor():
@@ -1509,6 +2310,814 @@ def chat_with_csv_editor():
         logger.error(f"Error in CSV editing chat: {e}", exc_info=True)
         return jsonify({'success': False, 'error': str(e)})
 
+@app.route('/check_ipaffs_compatibility', methods=['POST'])
+def check_ipaffs_compatibility():
+    """Check if the current PDF data is compatible with IPAFFS requirements."""
+    try:
+        # IPAFFS required headers (case-insensitive matching)
+        ipaffs_required_headers = [
+            'commodity code',
+            'genus and species', 
+            'eppo code',
+            'variety',
+            'class',
+            'intended for final users',
+            'commercial flower production',
+            'number of packages',
+            'type of package',
+            'quantity',
+            'quantity type',
+            'net weight (kg)',
+            'controlled atmosphere container'
+        ]
+        
+        # Get current data headers
+        extracted_data = session.get('extracted_data', {})
+        target_columns = session.get('target_columns', [])
+        
+        current_headers = []
+        
+        # Always check actual extracted data first for IPAFFS compatibility
+        # The schema might be limited but the actual extraction could have found all fields
+        if extracted_data:
+            # Check if extracted_data contains array of objects
+            array_of_objects_field = None
+            for field, value in extracted_data.items():
+                if isinstance(value, list) and len(value) > 0 and isinstance(value[0], dict):
+                    array_of_objects_field = field
+                    # Extract headers from the first object
+                    current_headers = list(value[0].keys())
+                    logger.info(f"Found array of objects in field '{field}', using object keys: {current_headers}")
+                    break
+            
+            if not array_of_objects_field:
+                # Single row PDF data - use field names
+                current_headers = list(extracted_data.keys())
+                logger.info(f"Using extracted_data keys for IPAFFS check: {current_headers}")
+        else:
+            logger.warning("No data found for IPAFFS compatibility check")
+            return jsonify({'compatible': False, 'reason': 'No data found'})
+        
+        # Normalize headers for comparison (lowercase, strip whitespace)
+        normalized_current = [h.lower().strip() for h in current_headers]
+        
+        logger.info(f"Checking IPAFFS compatibility with headers: {current_headers}")
+        logger.info(f"Normalized headers: {normalized_current}")
+        
+        # Check for required headers with exact matching only
+        matched_headers = {}
+        missing_headers = []
+        
+        for required in ipaffs_required_headers:
+            found = False
+            for current, normalized in zip(current_headers, normalized_current):
+                # Exact match only - much stricter
+                if (normalized == required.lower() or
+                    # Only specific exact variations
+                    (required == 'genus and species' and normalized == 'genus and species') or
+                    (required == 'eppo code' and normalized in ['eppocode', 'eppo code']) or
+                    (required == 'intended for final users' and normalized in ['intended for final users', 'intended for final users (or commercial flower production)']) or
+                    (required == 'commercial flower production' and normalized in ['commercial flower production', 'intended for final users (or commercial flower production)']) or
+                    (required == 'net weight (kg)' and normalized in ['net weight (kg)', 'net weight'])):
+                    matched_headers[required] = current
+                    found = True
+                    logger.info(f"Matched IPAFFS header '{required}' with '{current}'")
+                    break
+            
+            if not found:
+                missing_headers.append(required)
+                logger.info(f"Missing IPAFFS header: {required}")
+        
+        # Determine compatibility - need at least key headers
+        key_headers = ['genus and species', 'commodity code', 'eppo code']
+        has_key_headers = all(key in matched_headers for key in key_headers)
+        
+        compatible = has_key_headers and len(matched_headers) >= len(ipaffs_required_headers) * 0.6  # At least 60% match
+        
+        logger.info(f"IPAFFS compatibility result: {compatible} (matched {len(matched_headers)}/{len(ipaffs_required_headers)})")
+        
+        return jsonify({
+            'compatible': compatible,
+            'matched_headers': matched_headers,
+            'missing_headers': missing_headers,
+            'total_matched': len(matched_headers),
+            'total_required': len(ipaffs_required_headers)
+        })
+    
+    except Exception as e:
+        logger.error(f"Error checking IPAFFS compatibility: {e}")
+        return jsonify({'compatible': False, 'error': str(e)})
+
+@app.route('/prefill_ipaffs', methods=['POST'])
+def prefill_ipaffs():
+    """Pre-fill IPAFFS data using EPPO database."""
+    try:
+
+        
+        # Initialize EPPO lookup and commodity filter
+        lookup = EPPOLookup()
+        commodity_filter = get_commodity_filter()
+        
+        # Get current data
+        extracted_data = session.get('extracted_data', {})
+        target_columns = session.get('target_columns', [])
+        sample_data = session.get('sample_data', {})
+        
+        # Determine data format and extract genus/species data
+        genus_species_data = []
+        is_array_format = False
+        
+        # Always check actual extracted data first, like the compatibility checker
+        if extracted_data:
+            # Check if extracted_data contains array of objects
+            array_of_objects_field = None
+            for field, value in extracted_data.items():
+                if isinstance(value, list) and len(value) > 0 and isinstance(value[0], dict):
+                    array_of_objects_field = field
+                    # Check if the objects have genus and species
+                    first_obj = value[0]
+                    genus_species_key = None
+                    for key in first_obj.keys():
+                        if 'genus' in key.lower() and 'species' in key.lower():
+                            genus_species_key = key
+                            break
+                    
+                    if genus_species_key:
+                        logger.info(f"Processing IPAFFS pre-fill for array of objects format (field: {field})")
+                        is_array_format = True
+                        # Extract genus/species data from each object
+                        for obj in value:
+                            genus_species_data.append(obj.get(genus_species_key, ''))
+                        logger.info(f"Found genus/species key '{genus_species_key}' with {len(genus_species_data)} entries")
+                        break
+            
+            if not is_array_format:
+                # Single row format
+                logger.info("Processing IPAFFS pre-fill for single row format")
+                
+                # Find genus and species field
+                genus_species_field = None
+                for field in extracted_data.keys():
+                    if 'genus' in field.lower() and 'species' in field.lower():
+                        genus_species_field = field
+                        break
+                
+                if not genus_species_field:
+                    logger.error(f"Genus and Species field not found in extracted_data keys: {list(extracted_data.keys())}")
+                    return jsonify({'error': 'Genus and Species field not found'})
+                
+                genus_species_value = extracted_data.get(genus_species_field, '')
+                if isinstance(genus_species_value, list):
+                    genus_species_data = genus_species_value
+                else:
+                    genus_species_data = [genus_species_value] if genus_species_value else []
+                logger.info(f"Found genus/species field '{genus_species_field}' with value: {genus_species_value}")
+        elif target_columns and sample_data:
+            # Fallback to target_columns only if no extracted_data found array of objects
+            is_array_format = True
+            logger.info("Processing IPAFFS pre-fill for array/multi-row format (fallback)")
+            
+            # Find the genus and species column
+            genus_species_col = None
+            for col in target_columns:
+                if 'genus' in col.lower() and 'species' in col.lower():
+                    genus_species_col = col
+                    break
+            
+            if not genus_species_col:
+                logger.error(f"Genus and Species column not found in target_columns: {target_columns}")
+                return jsonify({'error': 'Genus and Species column not found'})
+            
+            genus_species_data = sample_data.get(genus_species_col, [])
+            logger.info(f"Found genus/species column '{genus_species_col}' with {len(genus_species_data)} entries")
+        else:
+            logger.error("No data found for IPAFFS pre-fill")
+            return jsonify({'error': 'No data found for IPAFFS pre-fill'})
+        
+        # Process each genus/species entry
+        eppo_codes = []
+        commodity_options = []  # List of options for each row
+        
+        for genus_species in genus_species_data:
+            if not genus_species or genus_species.strip() == '':
+                eppo_codes.append('')
+                commodity_options.append([])
+                continue
+            
+            # Query EPPO database using enhanced IPAFFS approach
+            try:
+                # Use the new enhanced IPAFFS lookup method
+                eppo_code, results = lookup.enhanced_lookup_ipaffs(genus_species)
+                
+                if eppo_code:
+                    eppo_codes.append(eppo_code)
+                    
+                    # Filter results to only include valid commodity codes for dropdown options
+                    filtered_results = commodity_filter.filter_eppo_results(results)
+                    
+                    if filtered_results:
+                        # Create commodity code options (only valid codes)
+                        options = []
+                        for commodity_name, eppo, commodity_code, description in filtered_results:
+                            options.append({
+                                'code': commodity_code,
+                                'description': description,
+                                'display': f"{commodity_code} - {description}"
+                            })
+                        commodity_options.append(options)
+                        
+                        logger.info(f"Enhanced IPAFFS lookup found {len(filtered_results)} valid commodity codes for '{genus_species}' with EPPO code '{eppo_code}'")
+                    else:
+                        # No valid commodity codes found after filtering
+                        # This can happen when we construct an EPPO code but have no matching results in DB
+                        # or when results don't match the valid commodity code filter
+                        
+                        # If we have results but they're filtered out, create options from all valid codes
+                        if results:
+                            # Create options from all valid commodity codes (from the hardcoded list)
+                            # Import the hardcoded commodity codes from eppo_lookup module
+                            from eppo_lookup import COMMODITY_CODES
+                            options = []
+                            for code, description in COMMODITY_CODES.items():
+                                options.append({
+                                    'code': code,
+                                    'description': description,
+                                    'display': f"{code} - {description}"
+                                })
+                            commodity_options.append(options)
+                            logger.info(f"IPAFFS lookup used fallback: providing all valid commodity codes for '{genus_species}' with constructed EPPO code '{eppo_code}'")
+                        else:
+                            commodity_options.append([])
+                            logger.info(f"No commodity codes found for '{genus_species}' with EPPO code '{eppo_code}'")
+                else:
+                    eppo_codes.append('')
+                    commodity_options.append([])
+                    logger.info(f"Enhanced IPAFFS lookup found no EPPO code for '{genus_species}'")
+                    
+            except Exception as e:
+                logger.error(f"Error in enhanced IPAFFS lookup for '{genus_species}': {e}")
+                eppo_codes.append('')
+                commodity_options.append([])
+        
+        # Helper functions for flexible column matching
+        def find_eppo_column(columns):
+            """Find EPPO code column with flexible matching."""
+            for column in columns:
+                column_lower = column.lower().strip()
+                # Check for exact matches and common variations
+                if (column_lower == 'eppocode' or 
+                    column_lower == 'eppo code' or 
+                    column_lower == 'eppo_code' or 
+                    column_lower == 'eppo-code' or
+                    ('eppo' in column_lower and 'code' in column_lower)):
+                    logger.info(f"Found EPPO column '{column}' using flexible match")
+                    return column
+            logger.info(f"No EPPO column found in: {columns}")
+            return None
+        
+        def find_intended_users_column(columns):
+            """Find intended users column with flexible matching."""
+            for column in columns:
+                column_lower = column.lower().strip()
+                # Check for exact matches and common variations
+                if (column_lower == 'intended for final users' or
+                    column_lower == 'intended for final users (or commercial flower production)' or
+                    column_lower == 'intended final users' or
+                    column_lower == 'final users' or
+                    column_lower == 'intended users' or
+                    ('intended' in column_lower and ('final' in column_lower or 'users' in column_lower)) or
+                    'commercial flower production' in column_lower):
+                    logger.info(f"Found intended users column '{column}' using flexible match")
+                    return column
+            logger.info(f"No intended users column found in: {columns}")
+            return None
+        
+        def find_controlled_atmosphere(columns):
+            """Find intended users column with flexible matching."""
+            for column in columns:
+                column_lower = column.lower().strip()
+                # Check for exact matches and common variations
+                if (column_lower == 'controlled atmosphere container' or
+                    column_lower == 'controlled atmosphere' or
+                    ('controlled' in column_lower and ('atmosphere' in column_lower))):
+                    logger.info(f"Found controlled atmosphere container '{column}' using flexible match")
+                    return column
+            logger.info(f"No intended users column found in: {columns}")
+            return None
+
+        def find_type_of_package(columns):
+            """Find intended users column with flexible matching."""
+            for column in columns:
+                column_lower = column.lower().strip()
+                # Check for exact matches and common variations
+                if (column_lower == 'type of package'):
+                    logger.info(f"Found controlled atmosphere container '{column}' using flexible match")
+                    return column
+            logger.info(f"No intended users column found in: {columns}")
+            return None
+        
+
+        # Update the data with pre-filled values
+        if is_array_format:
+            if array_of_objects_field and array_of_objects_field in extracted_data:
+                # Array of objects format from PDF - update the objects directly
+                logger.info("Updating array of objects data in extracted_data")
+                updated_extracted_data = extracted_data.copy()
+                objects_array = updated_extracted_data[array_of_objects_field]
+                
+                # Get column names from the first object
+                if objects_array and len(objects_array) > 0:
+                    first_obj = objects_array[0]
+                    object_columns = list(first_obj.keys())
+                    
+                    # Find EPPO code column
+                    eppo_col = find_eppo_column(object_columns)
+                    
+                    # Find intended users column  
+                    intended_col = find_intended_users_column(object_columns)
+
+                    # Update controlled atmosphere only if empty or not present
+                    controlled_atmosphere_col = find_controlled_atmosphere(object_columns)
+
+                    # Find type of package column
+                    type_of_package_col = find_type_of_package(object_columns)
+                    
+                    # Update each object in the array
+                    for i, obj in enumerate(objects_array):
+                        if i < len(eppo_codes):
+                            # Update EPPO code only if it's empty or not present
+                            if eppo_col:
+                                current_eppo_value = obj.get(eppo_col, '')
+                                if not current_eppo_value or str(current_eppo_value).strip() == '':
+                                    obj[eppo_col] = eppo_codes[i]
+                                    logger.info(f"Updated object {i} EPPO column '{eppo_col}' with '{eppo_codes[i]}'")
+                                else:
+                                    logger.info(f"Skipped object {i} EPPO column '{eppo_col}' - already has value: '{current_eppo_value}'")
+                            else:
+                                # Create new EPPO code field only if no existing EPPO field has data
+                                has_existing_eppo = False
+                                for key, value in obj.items():
+                                    if 'eppo' in key.lower() and 'code' in key.lower() and value and str(value).strip():
+                                        has_existing_eppo = True
+                                        logger.info(f"Found existing EPPO data in field '{key}' for object {i}: '{value}'")
+                                        break
+                                
+                                if not has_existing_eppo:
+                                    obj['EPPO code'] = eppo_codes[i]
+                                    logger.info(f"Created new EPPO code field for object {i} with '{eppo_codes[i]}'")
+                                else:
+                                    logger.info(f"Skipped creating EPPO code field for object {i} - existing EPPO data found")
+                            
+                            # Update intended users only if empty or not present
+                            if intended_col:
+                                current_value = obj.get(intended_col, '')
+                                if not current_value or str(current_value).strip() == '':
+                                    obj[intended_col] = 'No'
+                                    logger.info(f"Updated object {i} intended column '{intended_col}' with 'No'")
+                                else:
+                                    logger.info(f"Skipped object {i} intended column '{intended_col}' - already has value: '{current_value}'")
+                            else:
+                                # Create new intended users field only if no existing intended field has data
+                                has_existing_intended = False
+                                for key, value in obj.items():
+                                    if ('intended' in key.lower() and ('final' in key.lower() or 'users' in key.lower())) and value and str(value).strip():
+                                        has_existing_intended = True
+                                        logger.info(f"Found existing intended users data in field '{key}' for object {i}: '{value}'")
+                                        break
+                                
+                                if not has_existing_intended:
+                                    obj['Intended for final users'] = 'No'
+                                    logger.info(f"Created new intended users field for object {i} with 'No'")
+                                else:
+                                    logger.info(f"Skipped creating intended users field for object {i} - existing data found")
+
+                            
+                            if controlled_atmosphere_col:  
+                                current_value = obj.get(controlled_atmosphere_col, '')
+                                if not current_value or str(current_value).strip() == '':
+                                    obj[controlled_atmosphere_col] = 'No'
+                                    logger.info(f"Updated object {i} controlled atmosphere column '{controlled_atmosphere_col}' with 'No'")
+                                else:
+                                    logger.info(f"Skipped object {i} controlled atmosphere column '{controlled_atmosphere_col}' - already has value: '{current_value}'")
+                            else:
+                                # Create new controlled atmosphere field only if no existing controlled atmosphere field has data
+                                has_existing_controlled = False
+                                for key, value in obj.items():
+                                    if ('controlled' in key.lower() and 'atmosphere' in key.lower()) and value and str(value).strip():
+                                        has_existing_controlled = True
+                                        logger.info(f"Found existing controlled atmosphere data in field '{key}' for object {i}: '{value}'")
+                                        break
+                                
+                                if not has_existing_controlled:
+                                    obj['Controlled atmosphere container'] = 'No'
+                                    logger.info(f"Created new controlled atmosphere field for object {i} with 'No'")
+                                else:
+                                    logger.info(f"Skipped creating controlled atmosphere field for object {i} - existing data found")
+
+
+                            # Update type of package only if empty or not present
+                            if type_of_package_col:
+                                current_value = obj.get(type_of_package_col, '')
+                                if not current_value or str(current_value).strip() == '':
+                                    obj[type_of_package_col] = 'Other'
+                                    logger.info(f"Updated object {i} type of package column '{type_of_package_col}' with 'Other'")
+                                else:
+                                    logger.info(f"Skipped object {i} type of package column '{type_of_package_col}' - already has value: '{current_value}'")
+                            else:
+                                # Create new type of package field only if no existing type of package field has data
+                                has_existing_package = False
+                                for key, value in obj.items():
+                                    if ('type' in key.lower() and 'package' in key.lower()) and value and str(value).strip():
+                                        has_existing_package = True
+                                        logger.info(f"Found existing type of package data in field '{key}' for object {i}: '{value}'")
+                                        break
+                                
+                                if not has_existing_package:
+                                    obj['Type of package'] = 'Other'
+                                    logger.info(f"Created new type of package field for object {i} with 'Other'")
+                                else:
+                                    logger.info(f"Skipped creating type of package field for object {i} - existing data found")
+                
+                # Update session with modified extracted_data
+                session['extracted_data'] = updated_extracted_data
+                logger.info("Updated session extracted_data with pre-filled IPAFFS data")
+                
+            else:
+                # Multi-row format using target_columns/sample_data (fallback)
+                logger.info("Updating multi-row format using target_columns/sample_data")
+                updated_sample_data = sample_data.copy()
+                
+                # Find EPPO code column
+                eppo_col = find_eppo_column(target_columns)
+                
+                if eppo_col:
+                    # Only update EPPO codes where the existing value is empty
+                    existing_eppo_data = updated_sample_data.get(eppo_col, [])
+                    updated_eppo_data = []
+                    for i, existing_value in enumerate(existing_eppo_data):
+                        if not existing_value or str(existing_value).strip() == '':
+                            # Use new EPPO code if available
+                            new_value = eppo_codes[i] if i < len(eppo_codes) else ''
+                            updated_eppo_data.append(new_value)
+                            if new_value:
+                                logger.info(f"Updated row {i} EPPO column '{eppo_col}' with '{new_value}'")
+                        else:
+                            # Keep existing value
+                            updated_eppo_data.append(existing_value)
+                            logger.info(f"Kept existing EPPO value for row {i}: '{existing_value}'")
+                    updated_sample_data[eppo_col] = updated_eppo_data
+                    logger.info(f"Updated existing EPPO column '{eppo_col}' preserving {len([v for v in existing_eppo_data if v and str(v).strip()])} existing values")
+                else:
+                    # Check if any existing column has EPPO-like data before creating new column
+                    has_existing_eppo_data = False
+                    for col_name, col_data in updated_sample_data.items():
+                        if 'eppo' in col_name.lower() and 'code' in col_name.lower():
+                            # Check if this column has any non-empty values
+                            if any(value and str(value).strip() for value in col_data):
+                                has_existing_eppo_data = True
+                                logger.info(f"Found existing EPPO data in column '{col_name}' - skipping new EPPO column creation")
+                                break
+                    
+                    if not has_existing_eppo_data:
+                        # Create new EPPO code column
+                        target_columns.append('EPPO code')
+                        updated_sample_data['EPPO code'] = eppo_codes
+                        logger.info(f"Created new EPPO code column with {len(eppo_codes)} codes")
+                    else:
+                        logger.info("Skipped creating new EPPO code column - existing EPPO data found")
+                
+                # Find intended users column
+                intended_col = find_intended_users_column(target_columns)
+                
+                if intended_col:
+                    intended_data = updated_sample_data.get(intended_col, [])
+                    updated_count = 0
+                    for i in range(len(intended_data)):
+                        if not intended_data[i] or str(intended_data[i]).strip() == '':
+                            intended_data[i] = 'No'
+                            updated_count += 1
+                        else:
+                            logger.info(f"Kept existing intended users value for row {i}: '{intended_data[i]}'")
+                    updated_sample_data[intended_col] = intended_data
+                    logger.info(f"Updated existing intended users column '{intended_col}' - filled {updated_count} empty values with 'No'")
+                else:
+                    # Check if any existing column has intended users data before creating new column
+                    has_existing_intended_data = False
+                    for col_name, col_data in updated_sample_data.items():
+                        if ('intended' in col_name.lower() and ('final' in col_name.lower() or 'users' in col_name.lower())):
+                            # Check if this column has any non-empty values
+                            if any(value and str(value).strip() for value in col_data):
+                                has_existing_intended_data = True
+                                logger.info(f"Found existing intended users data in column '{col_name}' - skipping new column creation")
+                                break
+                    
+                    if not has_existing_intended_data:
+                        # Create new column
+                        target_columns.append('Intended for final users')
+                        updated_sample_data['Intended for final users'] = ['No'] * len(genus_species_data)
+                        logger.info(f"Created new intended users column with {len(genus_species_data)} 'No' values")
+                    else:
+                        logger.info("Skipped creating new intended users column - existing data found")
+
+                controlled_atmosphere_col = find_controlled_atmosphere(target_columns)
+
+                if controlled_atmosphere_col:
+                    controlled_data = updated_sample_data.get(controlled_atmosphere_col, [])
+                    updated_count = 0
+                    for i in range(len(controlled_data)):
+                        if not controlled_data[i] or str(controlled_data[i]).strip() == '':
+                            controlled_data[i] = 'No'
+                            updated_count += 1
+                        else:
+                            logger.info(f"Kept existing controlled atmosphere value for row {i}: '{controlled_data[i]}'")
+                    updated_sample_data[controlled_atmosphere_col] = controlled_data
+                    logger.info(f"Updated existing controlled atmosphere column '{controlled_atmosphere_col}' - filled {updated_count} empty values with 'No'")
+                else:
+                    # Check if any existing column has controlled atmosphere data before creating new column
+                    has_existing_controlled_data = False
+                    for col_name, col_data in updated_sample_data.items():
+                        if ('controlled' in col_name.lower() and 'atmosphere' in col_name.lower()):
+                            # Check if this column has any non-empty values
+                            if any(value and str(value).strip() for value in col_data):
+                                has_existing_controlled_data = True
+                                logger.info(f"Found existing controlled atmosphere data in column '{col_name}' - skipping new column creation")
+                                break
+                    
+                    if not has_existing_controlled_data:
+                        # Create new column
+                        target_columns.append('Controlled atmosphere container')
+                        updated_sample_data['Controlled atmosphere container'] = ['No'] * len(genus_species_data)
+                        logger.info(f"Created new controlled atmosphere column with {len(genus_species_data)} 'No' values")
+                    else:
+                        logger.info("Skipped creating new controlled atmosphere column - existing data found")
+
+                type_of_package_col = find_type_of_package(target_columns)
+                
+                if type_of_package_col:
+                    type_of_package_data = updated_sample_data.get(type_of_package_col, [])
+                    updated_count = 0
+                    for i in range(len(type_of_package_data)):
+                        if not type_of_package_data[i] or str(type_of_package_data[i]).strip() == '':
+                            type_of_package_data[i] = 'Other'
+                            updated_count += 1
+                        else:
+                            logger.info(f"Kept existing type of package value for row {i}: '{type_of_package_data[i]}'")
+                    updated_sample_data[type_of_package_col] = type_of_package_data
+                    logger.info(f"Updated existing type of package column '{type_of_package_col}' - filled {updated_count} empty values with 'Other'")
+                else:
+                    # Check if any existing column has type of package data before creating new column
+                    has_existing_package_data = False
+                    for col_name, col_data in updated_sample_data.items():
+                        if ('type' in col_name.lower() and 'package' in col_name.lower()):
+                            # Check if this column has any non-empty values
+                            if any(value and str(value).strip() for value in col_data):
+                                has_existing_package_data = True
+                                logger.info(f"Found existing type of package data in column '{col_name}' - skipping new column creation")
+                                break
+                    
+                    if not has_existing_package_data:
+                        # Create new column
+                        target_columns.append('Type of package')
+                        updated_sample_data['Type of package'] = ['Other'] * len(genus_species_data)
+                        logger.info(f"Created new type of package column with {len(genus_species_data)} 'Other' values")
+                    else:
+                        logger.info("Skipped creating new type of package column - existing data found")
+                
+                # Update session
+                session['target_columns'] = target_columns
+                session['sample_data'] = updated_sample_data
+            
+        else:
+            # Single row format
+            updated_extracted_data = extracted_data.copy()
+            
+            # Update EPPO code only if empty or not present
+            eppo_field = None
+            for field in extracted_data.keys():
+                if 'eppo' in field.lower() and 'code' in field.lower():
+                    eppo_field = field
+                    break
+            
+            if eppo_field:
+                current_eppo_value = updated_extracted_data.get(eppo_field, '')
+                if not current_eppo_value or str(current_eppo_value).strip() == '':
+                    if len(eppo_codes) > 0:
+                        updated_extracted_data[eppo_field] = eppo_codes[0] if len(eppo_codes) == 1 else eppo_codes
+                        logger.info(f"Updated single row EPPO field '{eppo_field}' with value")
+                else:
+                    logger.info(f"Skipped single row EPPO field '{eppo_field}' - already has value: '{current_eppo_value}'")
+            else:
+                # Check if any field has EPPO-like data before creating new field
+                has_existing_eppo = False
+                for field, value in updated_extracted_data.items():
+                    if 'eppo' in field.lower() and 'code' in field.lower() and value and str(value).strip():
+                        has_existing_eppo = True
+                        logger.info(f"Found existing EPPO data in field '{field}': '{value}'")
+                        break
+                
+                if not has_existing_eppo and len(eppo_codes) > 0:
+                    updated_extracted_data['EPPO code'] = eppo_codes[0] if len(eppo_codes) == 1 else eppo_codes
+                    logger.info("Created new EPPO code field for single row")
+                else:
+                    logger.info("Skipped creating EPPO code field - existing data found or no EPPO codes available")
+            
+            # Pre-fill "Intended for final users" only if empty or not present
+            intended_field = None
+            for field in extracted_data.keys():
+                if 'intended' in field.lower() and 'final' in field.lower():
+                    intended_field = field
+                    break
+            
+            if intended_field:
+                current_value = updated_extracted_data.get(intended_field, '')
+                if not current_value or str(current_value).strip() == '':
+                    updated_extracted_data[intended_field] = 'No'
+                    logger.info(f"Updated single row intended field '{intended_field}' with 'No'")
+                else:
+                    logger.info(f"Skipped single row intended field '{intended_field}' - already has value: '{current_value}'")
+            else:
+                # Check if any field has intended users data before creating new field
+                has_existing_intended = False
+                for field, value in updated_extracted_data.items():
+                    if ('intended' in field.lower() and ('final' in field.lower() or 'users' in field.lower())) and value and str(value).strip():
+                        has_existing_intended = True
+                        logger.info(f"Found existing intended users data in field '{field}': '{value}'")
+                        break
+                
+                if not has_existing_intended:
+                    updated_extracted_data['Intended for final users'] = 'No'
+                    logger.info("Created new intended users field for single row with 'No'")
+                else:
+                    logger.info("Skipped creating intended users field - existing data found")
+            
+            # Update session
+            session['extracted_data'] = updated_extracted_data
+        
+        return jsonify({
+            'success': True,
+            'eppo_codes_added': len([code for code in eppo_codes if code]),
+            'commodity_options': commodity_options,
+            'is_array_format': is_array_format,
+            'message': f'IPAFFS pre-fill completed. Added {len([code for code in eppo_codes if code])} EPPO codes.'
+        })
+    
+    except Exception as e:
+        logger.error(f"Error pre-filling IPAFFS data: {e}")
+        return jsonify({'error': str(e)})
+
+@app.route('/get_current_csv_data', methods=['GET'])
+def get_current_csv_data():
+    """Get the current CSV data from the session (for use after IPAFFS pre-fill)."""
+    try:
+        # Get current data from session
+        extracted_data = session.get('extracted_data', {})
+        target_columns = session.get('target_columns', [])
+        sample_data = session.get('sample_data', {})
+        
+        logger.info(f"Getting current CSV data - extracted_data keys: {list(extracted_data.keys())}, target_columns: {len(target_columns)}")
+        
+        if extracted_data:
+            # PDF mode - check for array of objects or single row
+            array_of_objects_field = None
+            for field, value in extracted_data.items():
+                if isinstance(value, list) and len(value) > 0 and isinstance(value[0], dict):
+                    array_of_objects_field = field
+                    logger.info(f"Found array of objects in field '{field}' with {len(value)} objects")
+                    break
+            
+            if array_of_objects_field:
+                # Array of objects format
+                objects_array = extracted_data[array_of_objects_field]
+                
+                # Extract all unique keys from all objects as column headers
+                all_keys = set()
+                for obj in objects_array:
+                    if isinstance(obj, dict):
+                        all_keys.update(obj.keys())
+                
+                headers = sorted(list(all_keys))
+                
+                # Create rows - each object becomes a row
+                csv_data = {
+                    'headers': headers,
+                    'data': []
+                }
+                
+                for obj in objects_array:
+                    if isinstance(obj, dict):
+                        row = {}
+                        for header in headers:
+                            value = obj.get(header, '')
+                            if isinstance(value, (dict, list)):
+                                value = json.dumps(value)
+                            elif value is None:
+                                value = ''
+                            row[header] = str(value)
+                        csv_data['data'].append(row)
+                
+                logger.info(f"Returning array of objects CSV data with {len(headers)} columns and {len(csv_data['data'])} rows")
+                return jsonify({
+                    'success': True,
+                    'csv_data': csv_data,
+                    'format': 'array_of_objects'
+                })
+            else:
+                # Single row PDF format
+                headers = list(extracted_data.keys())
+                csv_data = {
+                    'headers': headers,
+                    'data': []
+                }
+                
+                # Create a single row
+                row = {}
+                for field in headers:
+                    value = extracted_data.get(field, '')
+                    if isinstance(value, (list, dict)):
+                        value = json.dumps(value)
+                    elif value is None:
+                        value = ''
+                    row[field] = str(value)
+                
+                csv_data['data'].append(row)
+                
+                logger.info(f"Returning single row CSV data with {len(headers)} columns")
+                return jsonify({
+                    'success': True,
+                    'csv_data': csv_data,
+                    'format': 'single_row'
+                })
+        elif target_columns and sample_data:
+            # Multi-row format (either Excel mode or converted PDF)
+            headers = target_columns
+            
+            # Determine the maximum number of rows
+            max_rows = 0
+            for col in headers:
+                col_data = sample_data.get(col, [])
+                max_rows = max(max_rows, len(col_data))
+            
+            # Create rows
+            csv_data = {
+                'headers': headers,
+                'data': []
+            }
+            
+            for row_idx in range(max_rows):
+                row = {}
+                for col in headers:
+                    col_data = sample_data.get(col, [])
+                    row[col] = col_data[row_idx] if row_idx < len(col_data) else ''
+                csv_data['data'].append(row)
+            
+            logger.info(f"Returning multi-row CSV data with {len(headers)} columns and {len(csv_data['data'])} rows")
+            return jsonify({
+                'success': True,
+                'csv_data': csv_data,
+                'format': 'multi_row'
+            })
+        else:
+            return jsonify({'success': False, 'error': 'No data found in session'})
+    
+    except Exception as e:
+        logger.error(f"Error getting current CSV data: {e}")
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/update_commodity_selection', methods=['POST'])
+def update_commodity_selection():
+    """Update the commodity code selection for a specific row."""
+    try:
+        data = request.json
+        row_index = data.get('row_index')
+        commodity_code = data.get('commodity_code')
+        display_text = data.get('display_text', '')
+        
+        if row_index is None:
+            return jsonify({'error': 'Row index not provided'})
+        
+        # Get or create commodity selections in session
+        commodity_selections = session.get('commodity_selections', {})
+        
+        # Store the selection (use string key for JSON serialization)
+        commodity_selections[str(row_index)] = {
+            'code': commodity_code,
+            'display_text': display_text
+        }
+        
+        # Update session
+        session['commodity_selections'] = commodity_selections
+        
+        logger.info(f"Updated commodity selection for row {row_index}: {commodity_code} ({display_text})")
+        
+        return jsonify({
+            'success': True,
+            'message': f'Commodity selection updated for row {row_index}'
+        })
+        
+    except Exception as e:
+        logger.error(f"Error updating commodity selection: {e}")
+        return jsonify({'error': str(e)})
+
 @app.route('/update_csv_preview', methods=['POST'])
 def update_csv_preview():
     """Update the session with edited CSV data."""
@@ -1520,51 +3129,113 @@ def update_csv_preview():
         if not csv_data:
             return jsonify({'error': 'Missing CSV data'})
         
-        # Get current session data
-        target_columns = session.get('target_columns', [])
-        sample_data = session.get('sample_data', {})
-        suggested_data = session.get('suggested_data', {})
-        
-        if not target_columns:
-            return jsonify({'error': 'No active analysis session found'})
-        
-        # Convert edited CSV data to sample_data format
-        headers = csv_data.get('headers', [])
-        data_rows = csv_data.get('data', [])
-        
-        # Log the state of data before update
-        logger.info(f"Updating CSV preview with {len(headers)} columns and {len(data_rows)} rows")
-        logger.debug(f"Headers before update: {list(sample_data.keys())}")
-        
-        # Create a completely new sample_data dictionary, effectively replacing
-        # the old one rather than merging with it. This ensures renamed columns
-        # don't appear twice.
-        new_sample_data = {}
-        
-        for col in headers:
-            column_data = []
-            for row in data_rows:
-                if col in row:
-                    column_data.append(row[col])
-            new_sample_data[col] = column_data
-            logger.debug(f"Column {col} updated with {len(column_data)} values")
-        
-        # Replace target_columns list with the new headers to make sure
-        # everything stays in sync when columns are renamed
-        session['target_columns'] = headers
-        
-        # Update session data with edited values - completely replacing old data
-        session['sample_data'] = new_sample_data
-        logger.info(f"Session sample_data updated successfully with {len(new_sample_data)} columns")
-        
-        return jsonify({
-            'success': True,
-            'message': 'CSV preview updated successfully'
-        })
+        # Check if we're in PDF mode or Excel mode
+        extracted_data = session.get('extracted_data')
+        if extracted_data:
+            # PDF mode - but now handle multiple rows properly
+            headers = csv_data.get('headers', [])
+            data_rows = csv_data.get('data', [])
+            
+            logger.info(f"Updating PDF data with {len(headers)} fields and {len(data_rows)} rows")
+            
+            if data_rows:
+                if len(data_rows) == 1:
+                    # Single row - use original logic for backward compatibility
+                    updated_data = {}
+                    first_row = data_rows[0]
+                    
+                    for field in headers:
+                        value = first_row.get(field, '')
+                        # Try to parse JSON strings back to objects if they were originally complex
+                        if isinstance(value, str) and (value.startswith('{') or value.startswith('[')):
+                            try:
+                                value = json.loads(value)
+                            except (json.JSONDecodeError, ValueError):
+                                # If parsing fails, keep as string
+                                pass
+                        updated_data[field] = value
+                    
+                    # Update the session with single row data
+                    session['extracted_data'] = updated_data
+                else:
+                    # Multiple rows - convert to Excel-like format
+                    logger.info(f"Converting PDF data to multi-row format with {len(data_rows)} rows")
+                    
+                    # Create sample_data format like Excel mode
+                    new_sample_data = {}
+                    for col in headers:
+                        column_data = []
+                        for row in data_rows:
+                            value = row.get(col, '')
+                            # Try to parse JSON strings back to objects if they were originally complex
+                            if isinstance(value, str) and (value.startswith('{') or value.startswith('[')):
+                                try:
+                                    value = json.loads(value)
+                                except (json.JSONDecodeError, ValueError):
+                                    pass
+                            column_data.append(value)
+                        new_sample_data[col] = column_data
+                    
+                    # Switch to Excel-like mode for multi-row data
+                    session['target_columns'] = headers
+                    session['sample_data'] = new_sample_data
+                    
+                    # Clear the single-row extracted_data since we're now in multi-row mode
+                    session['extracted_data'] = {}
+                    
+                    logger.info(f"PDF data converted to Excel-like format with {len(new_sample_data)} columns and {len(data_rows)} rows")
+            
+            return jsonify({
+                'success': True,
+                'message': 'PDF data updated successfully'
+            })
+        else:
+            # Excel mode - use existing logic
+            target_columns = session.get('target_columns', [])
+            sample_data = session.get('sample_data', {})
+            suggested_data = session.get('suggested_data', {})
+            
+            if not target_columns:
+                return jsonify({'error': 'No active analysis session found'})
+            
+            # Convert edited CSV data to sample_data format
+            headers = csv_data.get('headers', [])
+            data_rows = csv_data.get('data', [])
+            
+            # Log the state of data before update
+            logger.info(f"Updating CSV preview with {len(headers)} columns and {len(data_rows)} rows")
+            logger.debug(f"Headers before update: {list(sample_data.keys())}")
+            
+            # Create a completely new sample_data dictionary, effectively replacing
+            # the old one rather than merging with it. This ensures renamed columns
+            # don't appear twice.
+            new_sample_data = {}
+            
+            for col in headers:
+                column_data = []
+                for row in data_rows:
+                    if col in row:
+                        column_data.append(row[col])
+                new_sample_data[col] = column_data
+                logger.debug(f"Column {col} updated with {len(column_data)} values")
+            
+            # Replace target_columns list with the new headers to make sure
+            # everything stays in sync when columns are renamed
+            session['target_columns'] = headers
+            
+            # Update session data with edited values - completely replacing old data
+            session['sample_data'] = new_sample_data
+            logger.info(f"Session sample_data updated successfully with {len(new_sample_data)} columns")
+            
+            return jsonify({
+                'success': True,
+                'message': 'CSV preview updated successfully'
+            })
     
     except Exception as e:
         logger.error(f"Error updating CSV preview: {e}")
         return jsonify({'error': str(e)})
+
 
 @app.teardown_appcontext
 def cleanup_temp_files(exception=None):

@@ -30,6 +30,7 @@ class VerifierState(TypedDict):
     csv_file_path: str
     user_request: str
     step_count: int
+    unedited_csv_path: str  # Path to the original unedited CSV for comparison (REQUIRED)
 
 def create_csv_verifier_agent(verbose=False):
     """
@@ -52,18 +53,20 @@ You are a CSV file verification system that evaluates whether requested changes 
 # Verification Process
 1. Understand exactly what changes were requested
 2. Examine the current state of the data (post-edits)
-3. For each specific operation in the user's request:
+3. ALWAYS compare the edited and unedited versions to confirm changes - this is REQUIRED
+4. For each specific operation in the user's request:
    a. Identify the exact column(s) or row(s) that should have been modified
    b. Use csv_pandas_eval to check the current state
-   c. Verify if the current state matches the requested change
-   d. Document clear evidence of success or failure
+   c. If available, use csv_pandas_eval on the unedited CSV to compare before/after states
+   d. Verify if the current state matches the requested change
+   e. Document clear evidence of success or failure
 
 # Example Operations and Verification Approach
-- Row removal → Check if specified rows no longer exist
-- Column addition → Verify column exists with correct values
-- Value updates → Compare values against requested changes
-- Filtering → Confirm only matching rows remain
-- Data cleaning → Verify format/standardization occurred
+- Row removal → Check if specified rows no longer exist in edited CSV but do exist in unedited CSV
+- Column addition → Verify column exists with correct values in edited CSV but not in unedited CSV
+- Value updates → Compare values against requested changes, confirming they differ from original values
+- Filtering → Confirm only matching rows remain in edited CSV while unedited CSV has additional rows
+- Data cleaning → Verify format/standardization occurred by comparing both versions
 
 # Output Format
 Your final response MUST be a JSON object:
@@ -80,13 +83,18 @@ Where VERDICT_VALUE must be one of:
 - "IN_PROGRESS" - Still performing verification checks
 
 # Available Tool
-csv_pandas_eval: Execute Python code to verify CSV data. Create a function 'verify_dataframe(df)' that returns verification results.
+csv_pandas_eval: Execute Python code to verify CSV data. Create a function 'verify_dataframe(df, unedited_df)' that takes BOTH the edited and unedited DataFrames and returns verification results.
+IMPORTANT: You must ALWAYS compare both DataFrames for proper verification:
+1. The edited CSV is available as 'df'
+2. The original unedited CSV is available as 'unedited_df'
+3. Your verification code must analyze differences between them
 
 # Critical Requirements
 - Make each check specific and targeted to verify a particular operation
 - Gather complete evidence before making your determination
 - Return IN_PROGRESS verdict if you still need to perform additional checks 
 - Do not suggest new edits or alternative approaches
+- If both edited and unedited CSV files are available, always compare them to verify changes
 """
 
     graph_builder = StateGraph(VerifierState)
@@ -125,9 +133,28 @@ csv_pandas_eval: Execute Python code to verify CSV data. Create a function 'veri
                     df_info_str = f"Error loading CSV: {str(e)}"
                     logger.error(f"Error loading CSV structure: {e}")
                 
+                # Get the unedited CSV path if available and add information about it
+                unedited_csv_path = state.get("unedited_csv_path", "")
+                unedited_df_info_str = ""
+                
+                if unedited_csv_path and os.path.exists(unedited_csv_path):
+                    try:
+                        unedited_df = pd.read_csv(unedited_csv_path)
+                        unedited_df_info = {
+                            "columns": list(unedited_df.columns),
+                            "shape": unedited_df.shape,
+                            "dtypes": {col: str(dtype) for col, dtype in unedited_df.dtypes.items()},
+                            "sample": unedited_df.head(3).to_dict('records') if not unedited_df.empty else {}
+                        }
+                        unedited_df_info_str = f"\n\nUnedited CSV Structure:\nColumns: {unedited_df_info['columns']}\nShape: {unedited_df_info['shape']}\nSample data: {unedited_df_info['sample']}"
+                        logger.info(f"Loaded unedited CSV structure: {unedited_df_info_str[:200]}...")
+                    except Exception as e:
+                        unedited_df_info_str = f"\n\nError loading unedited CSV: {str(e)}"
+                        logger.error(f"Error loading unedited CSV structure: {e}")
+                
                 # Add DataFrame structure information to the context message
                 context_message = HumanMessage(
-                    content=f"User request: {user_request}\nCSV file path: {csv_file_path}\n\n{df_info_str}"
+                    content=f"User request: {user_request}\nCSV file path: {csv_file_path}\nUnedited CSV file path: {unedited_csv_path}\n\n{df_info_str}{unedited_df_info_str}"
                 )
                 messages = [HumanMessage(content=system_message, name="system"), context_message]
             
@@ -201,8 +228,17 @@ Make sure you complete ALL verifications before providing your final JSON verdic
                 logger.info(f"[Verifier] Tool call: {tool_name} with args: {tool_args}")
             try:
                 if tool_name == "csv_pandas_eval":
+                    # Always pass both the edited CSV and unedited CSV to the tool
+                    # Set the edited CSV path
                     if "csv_file_path" not in tool_args:
                         tool_args["csv_file_path"] = state["csv_file_path"]
+                    elif tool_args["csv_file_path"] == "unedited" and state.get("unedited_csv_path"):
+                        tool_args["csv_file_path"] = state["unedited_csv_path"]
+                    
+                    # Always include the unedited CSV path
+                    if "unedited_csv_path" not in tool_args and state.get("unedited_csv_path"):
+                        tool_args["unedited_csv_path"] = state["unedited_csv_path"]
+                        
                     logger.info(f"Verifier executing tool {tool_name} with args {tool_args}")
                     
                     # Call the appropriate tool
@@ -406,17 +442,21 @@ class CSVVerifierAgent:
             if messages and len(messages) > 0:
                 # Add a hint to examine the CSV structure first
                 hint_message = HumanMessage(
-                    content=f"You may want to first examine the CSV structure using csv_pandas_eval with a verification function like this:\n\ndef verify_dataframe(df):\n    # Check basic structure\n    structure_info = {{\n        'columns': list(df.columns),\n        'rows': len(df),\n        'sample_data': df.head(5).to_dict('records')\n    }}\n    return structure_info\n\nWhen you've completed verification, provide your verdict using this format:\n{format_instructions}"
+                    content=f"You must examine both the edited and unedited CSV structures using csv_pandas_eval with a verification function like this:\n\ndef verify_dataframe(df, unedited_df):\n    # Compare both DataFrames to verify changes\n    structure_info = {{\n        'edited_columns': list(df.columns),\n        'edited_rows': len(df),\n        'edited_sample': df.head(5).to_dict('records'),\n        'unedited_columns': list(unedited_df.columns),\n        'unedited_rows': len(unedited_df),\n        'unedited_sample': unedited_df.head(5).to_dict('records'),\n        'changes_detected': df.equals(unedited_df) == False\n    }}\n    return structure_info\n\nWhen you've completed verification, provide your verdict using this format:\n{format_instructions}"
                 )
                 # Insert after the first message
                 messages = [messages[0], hint_message] + messages[1:] if len(messages) > 1 else messages + [hint_message]
                 logger.info("Added hint for examining CSV structure with output format instructions")
             
+            # Include the unedited CSV path in the input if available
+            unedited_csv_path = state.get("unedited_csv_path", "")
+            
             graph_input = {
                 "messages": messages,
                 "csv_file_path": csv_file_path,
                 "user_request": user_request,
-                "step_count": step_count
+                "step_count": step_count,
+                "unedited_csv_path": unedited_csv_path
             }
             graph_output = self.graph.invoke(graph_input)
             all_messages = messages + graph_output["messages"]

@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 class EditAgentState(TypedDict):
     messages: Annotated[list, add_messages]
     csv_file_path: str
+    unedited_csv_path: str = ""  # Path to unedited CSV for verification
 
 def create_csv_edit_agent(verbose=False):
     """
@@ -182,6 +183,8 @@ When you respond always provide the complete function definition as a string arg
         successful_edit = False
         edit_command = None
         
+        # We no longer need to save a copy of the original CSV here - that's done by the supervisor
+        
         # Execute the requested tool calls
         for tool_call in last_message.tool_calls:
             tool_name = tool_call["name"]
@@ -342,15 +345,23 @@ class CSVEditAgent:
                 logger.info(f"[CSVEditAgent] State: {state}")
             messages = state.get("messages", [])
             csv_file_path = state.get("csv_file_path", "")
+            
+            # Get the unedited CSV path if it's already in the state
+            unedited_csv_path = state.get("unedited_csv_path", "")
+            
             graph_input = {
                 "messages": messages,
-                "csv_file_path": csv_file_path
+                "csv_file_path": csv_file_path,
+                "unedited_csv_path": unedited_csv_path
             }
             graph_output = self.graph.invoke(graph_input)
             all_messages = messages + graph_output["messages"]
+            
+            # Include the unedited_csv_path in the result
             result = {
                 "messages": all_messages,
-                "csv_file_path": csv_file_path
+                "csv_file_path": csv_file_path,
+                "unedited_csv_path": graph_output.get("unedited_csv_path", unedited_csv_path)
             }
             if self.verbose:
                 logger.info(f"[CSVEditAgent] Final result: {result}")

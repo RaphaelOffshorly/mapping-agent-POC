@@ -1,4 +1,5 @@
 from llama_cloud_services import LlamaExtract
+from llama_cloud.types import ExtractConfig, ExtractMode
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 import os
@@ -33,6 +34,9 @@ class PDFExtractAgent:
         
         # Initialize client with API key
         self.extractor = LlamaExtract(api_key=self.api_key)
+        # self.config = ExtractConfig(use_reasoning=True,
+        #                         cite_sources=False,
+        #                         extraction_mode=ExtractMode.ACCURATE)
         
         if self.verbose:
             logger.info("PDFExtractAgent initialized")
@@ -69,10 +73,10 @@ class PDFExtractAgent:
             
             # Create agent with schema
             agent = self.extractor.get_agent(
-                name=f"Excel Extractor"
+                name=f"PDF Extract Agent",
             )
-
             agent.data_schema = schema_data
+            # agent.config = self.config
             agent.save()
             
             # Extract data from PDF

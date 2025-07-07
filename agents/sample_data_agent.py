@@ -80,13 +80,16 @@ class SampleDataAgent(BaseAgent):
         sample_data_tool = self.tools[0]
         self.think("Using SampleDataTool to extract sample data")
         
+        # Get column descriptions from state
+        column_descriptions = state.get('column_descriptions', {})
+        
         # Pass column ranges if available
         if column_ranges:
             self.think("Passing pre-generated column ranges to the tool")
-            sample_data = sample_data_tool.run((file_path, matches, column_ranges))
+            sample_data = sample_data_tool.run((file_path, matches, column_ranges, column_descriptions))
         else:
             self.think("Letting the tool generate column ranges as needed")
-            sample_data = sample_data_tool.run((file_path, matches))
+            sample_data = sample_data_tool.run((file_path, matches, None, column_descriptions))
         
         self.think(f"Extracted sample data for {len(sample_data)} target columns")
         if sample_data:

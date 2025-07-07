@@ -9,7 +9,7 @@ from utils.excel import retrieve_data_from_column_ranges
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class SampleDataTool(BaseTool[Tuple[str, Dict[str, Dict[str, str]], Optional[Dict[str, List[Tuple[str, str, str, str]]]]], Dict[str, List[str]]]):
+class SampleDataTool(BaseTool[Tuple[str, Dict[str, Dict[str, str]], Optional[Dict[str, List[Tuple[str, str, str, str]]]], Optional[Dict[str, Dict[str, Any]]]], Dict[str, List[str]]]):
     """Tool for retrieving sample data using column ranges."""
     
     def __init__(self, max_samples: int = 20):
@@ -26,15 +26,16 @@ class SampleDataTool(BaseTool[Tuple[str, Dict[str, Dict[str, str]], Optional[Dic
         self.max_samples = max_samples
         self.data_suggestion_tool = DataSuggestionTool()
     
-    def run(self, input_data: Tuple[str, Dict[str, Dict[str, str]], Optional[Dict[str, List[Tuple[str, str, str, str]]]]]) -> Dict[str, List[str]]:
+    def run(self, input_data: Tuple[str, Dict[str, Dict[str, str]], Optional[Dict[str, List[Tuple[str, str, str, str]]]], Optional[Dict[str, Dict[str, Any]]]]) -> Dict[str, List[str]]:
         """
         Retrieve sample data using column ranges.
         
         Args:
-            input_data: A tuple of (file_path, matches, pre_generated_column_ranges)
+            input_data: A tuple of (file_path, matches, pre_generated_column_ranges, column_descriptions)
                 - file_path: Path to the Excel file
                 - matches: Dict of target columns to matched headers
                 - pre_generated_column_ranges: Optional dict of pre-generated column ranges
+                - column_descriptions: Optional dict of column descriptions
             
         Returns:
             A dictionary with sample data for each target column
@@ -42,8 +43,12 @@ class SampleDataTool(BaseTool[Tuple[str, Dict[str, Dict[str, str]], Optional[Dic
         if len(input_data) == 2:
             file_path, matches = input_data
             pre_generated_column_ranges = None
-        else:
+            column_descriptions = None
+        elif len(input_data) == 3:
             file_path, matches, pre_generated_column_ranges = input_data
+            column_descriptions = None
+        else:
+            file_path, matches, pre_generated_column_ranges, column_descriptions = input_data
         
         if not file_path or not matches:
             return {}
@@ -64,6 +69,9 @@ class SampleDataTool(BaseTool[Tuple[str, Dict[str, Dict[str, str]], Optional[Dic
                             "data_type": info.get("data_type", ""),
                             "sample_values": info.get("sample_values", [])
                         }
+                    elif column_descriptions is not None:
+                        if target in column_descriptions:
+                            column_description = column_descriptions[target]
                     
                     # Generate column ranges using the data suggestion tool
                     column_ranges = self.data_suggestion_tool.run((file_path, target, info["match"], column_description))
