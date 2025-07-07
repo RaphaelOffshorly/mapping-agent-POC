@@ -40,6 +40,13 @@ var/
 ehthumbs.db
 Thumbs.db
 
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+database/
+schemas/*.db
+
 # Logs
 logs/
 *.log
