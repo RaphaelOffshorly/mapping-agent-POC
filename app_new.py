@@ -65,6 +65,24 @@ os.makedirs(app.config['SESSION_FILE_DIR'], exist_ok=True)
 from flask_session import Session
 Session(app)
 
+# Initialize global EPPO lookup instance (with connection pooling for better performance)
+# This will be shared across all requests to avoid creating new connections each time
+eppo_lookup_instance = None
+
+def get_eppo_lookup():
+    """Get the global EPPO lookup instance, creating it if needed."""
+    global eppo_lookup_instance
+    if eppo_lookup_instance is None:
+        try:
+            eppo_lookup_instance = EPPOLookup(use_pool=True)
+            logger.info("Global EPPO lookup instance initialized successfully with connection pooling")
+        except Exception as e:
+            logger.error(f"Failed to initialize EPPO lookup instance: {e}")
+            # Create without pooling as fallback
+            eppo_lookup_instance = EPPOLookup(use_pool=False)
+            logger.info("EPPO lookup instance initialized without connection pooling (fallback)")
+    return eppo_lookup_instance
+
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -2415,7 +2433,7 @@ def prefill_ipaffs():
 
         
         # Initialize EPPO lookup and commodity filter
-        lookup = EPPOLookup()
+        lookup = get_eppo_lookup()
         commodity_filter = get_commodity_filter()
         
         # Get current data

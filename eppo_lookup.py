@@ -5,10 +5,17 @@ EPPO Code Lookup Utility
 Provides functions to lookup EPPO codes by commodity name from the SQLite database.
 """
 
-import sqlite3
+import psycopg2
+import psycopg2.extras
+import psycopg2.pool
 import os
 import re
 from typing import List, Tuple, Optional, Dict
+from urllib.parse import urlparse
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Hardcoded commodity codes dictionary from commodity_code.csv
 COMMODITY_CODES = {
@@ -50,18 +57,65 @@ COMMODITY_CODES = {
 }
 
 class EPPOLookup:
-    """Class for looking up EPPO codes from the SQLite database."""
+    """Class for looking up EPPO codes from the PostgreSQL database."""
     
-    def __init__(self, db_path: str = "database/eppo_codes.db"):
+    # Class-level connection pool
+    _connection_pool = None
+    _pool_lock = None
+    
+    def __init__(self, db_url: str = None, use_pool: bool = True):
         """
-        Initialize the EPPO lookup with database path.
+        Initialize the EPPO lookup with database URL.
         
         Args:
-            db_path: Path to the SQLite database file
+            db_url: PostgreSQL connection URL (defaults to environment variable)
+            use_pool: Whether to use connection pooling (recommended for web apps)
         """
-        self.db_path = db_path
-        if not os.path.exists(db_path):
-            raise FileNotFoundError(f"Database not found: {db_path}")
+        # Get database URL from environment variable if not provided
+        self.db_url = db_url or os.getenv('POSTGRESQL_URL')
+        if not self.db_url:
+            raise ValueError("PostgreSQL URL not provided and POSTGRESQL_URL environment variable not set")
+        
+        self.db_params = self._parse_postgresql_url(self.db_url)
+        self.use_pool = use_pool
+        
+        # Initialize connection pool if enabled and not already created
+        if self.use_pool:
+            self._init_connection_pool()
+    
+    def _init_connection_pool(self):
+        """Initialize the connection pool (thread-safe)."""
+        import threading
+        
+        # Initialize lock if not already done
+        if EPPOLookup._pool_lock is None:
+            EPPOLookup._pool_lock = threading.Lock()
+        
+        # Only create pool if it doesn't exist
+        with EPPOLookup._pool_lock:
+            if EPPOLookup._connection_pool is None:
+                try:
+                    EPPOLookup._connection_pool = psycopg2.pool.SimpleConnectionPool(
+                        1,  # minimum connections
+                        20,  # maximum connections
+                        **self.db_params
+                    )
+                    print("PostgreSQL connection pool initialized successfully")
+                except Exception as e:
+                    print(f"Failed to initialize connection pool: {e}")
+                    # Fall back to non-pooled connections
+                    self.use_pool = False
+    
+    def _parse_postgresql_url(self, url: str) -> dict:
+        """Parse PostgreSQL URL and return connection parameters."""
+        parsed = urlparse(url)
+        return {
+            'host': parsed.hostname,
+            'port': parsed.port or 5432,
+            'database': parsed.path[1:],  # Remove leading slash
+            'user': parsed.username,
+            'password': parsed.password
+        }
     
     def clean_genus_species(self, genus_species: str) -> str:
         """
@@ -89,9 +143,32 @@ class EPPOLookup:
         
         return cleaned
     
-    def get_connection(self) -> sqlite3.Connection:
-        """Get a database connection."""
-        return sqlite3.connect(self.db_path)
+    def get_connection(self) -> psycopg2.extensions.connection:
+        """Get a database connection from pool or create new one."""
+        if self.use_pool and EPPOLookup._connection_pool is not None:
+            try:
+                return EPPOLookup._connection_pool.getconn()
+            except Exception as e:
+                print(f"Failed to get connection from pool: {e}")
+                # Fall back to direct connection
+                return psycopg2.connect(**self.db_params)
+        else:
+            return psycopg2.connect(**self.db_params)
+    
+    def _return_connection(self, conn):
+        """Return a connection to the pool."""
+        if self.use_pool and EPPOLookup._connection_pool is not None:
+            try:
+                EPPOLookup._connection_pool.putconn(conn)
+            except Exception as e:
+                print(f"Failed to return connection to pool: {e}")
+                # Close the connection instead
+                try:
+                    conn.close()
+                except:
+                    pass
+        else:
+            conn.close()
     
     def lookup_by_commodity_name(self, commodity_name: str, exact_match: bool = True) -> List[Tuple]:
         """
@@ -115,7 +192,7 @@ class EPPOLookup:
                 query = """
                     SELECT commodity_name, eppo_code, commodity_code, commodity_code_description
                     FROM eppo_codes 
-                    WHERE LOWER(commodity_name) = LOWER(?)
+                    WHERE LOWER(commodity_name) = LOWER(%s)
                     ORDER BY commodity_name
                 """
                 cursor.execute(query, (cleaned_name,))
@@ -123,7 +200,7 @@ class EPPOLookup:
                 query = """
                     SELECT commodity_name, eppo_code, commodity_code, commodity_code_description
                     FROM eppo_codes 
-                    WHERE LOWER(commodity_name) LIKE LOWER(?)
+                    WHERE LOWER(commodity_name) LIKE LOWER(%s)
                     ORDER BY commodity_name
                 """
                 cursor.execute(query, (f"%{cleaned_name}%",))
@@ -132,7 +209,7 @@ class EPPOLookup:
             return results
             
         finally:
-            conn.close()
+            self._return_connection(conn)
     
     def lookup_by_eppo_code(self, eppo_code: str) -> List[Tuple]:
         """
@@ -151,7 +228,7 @@ class EPPOLookup:
             query = """
                 SELECT commodity_name, eppo_code, commodity_code, commodity_code_description
                 FROM eppo_codes 
-                WHERE UPPER(eppo_code) = UPPER(?)
+                WHERE UPPER(eppo_code) = UPPER(%s)
                 ORDER BY commodity_name
             """
             cursor.execute(query, (eppo_code,))
@@ -159,7 +236,7 @@ class EPPOLookup:
             return results
             
         finally:
-            conn.close()
+            self._return_connection(conn)
     
     def search_commodities(self, search_term: str, limit: int = 50) -> List[Tuple]:
         """
@@ -182,10 +259,10 @@ class EPPOLookup:
             query = """
                 SELECT commodity_name, eppo_code, commodity_code, commodity_code_description
                 FROM eppo_codes 
-                WHERE LOWER(commodity_name) LIKE LOWER(?)
-                   OR LOWER(commodity_code_description) LIKE LOWER(?)
+                WHERE LOWER(commodity_name) LIKE LOWER(%s)
+                   OR LOWER(commodity_code_description) LIKE LOWER(%s)
                 ORDER BY commodity_name
-                LIMIT ?
+                LIMIT %s
             """
             search_pattern = f"%{cleaned_term}%"
             cursor.execute(query, (search_pattern, search_pattern, limit))
@@ -193,7 +270,7 @@ class EPPOLookup:
             return results
             
         finally:
-            conn.close()
+            self._return_connection(conn)
     
     def get_stats(self) -> dict:
         """
@@ -218,18 +295,15 @@ class EPPOLookup:
             cursor.execute("SELECT COUNT(DISTINCT eppo_code) FROM eppo_codes")
             unique_eppo_codes = cursor.fetchone()[0]
             
-            # Database file size
-            db_size = os.path.getsize(self.db_path) / (1024 * 1024)  # MB
-            
             return {
                 'total_records': total_records,
                 'unique_commodities': unique_commodities,
                 'unique_eppo_codes': unique_eppo_codes,
-                'database_size_mb': round(db_size, 2)
+                'database_type': 'PostgreSQL'
             }
             
         finally:
-            conn.close()
+            self._return_connection(conn)
     
     def lookup_by_first_word_ipaffs(self, genus_species: str) -> Tuple[str, List[Tuple]]:
         """
@@ -271,7 +345,7 @@ class EPPOLookup:
             query = """
                 SELECT commodity_name, eppo_code, commodity_code, commodity_code_description
                 FROM eppo_codes 
-                WHERE LOWER(commodity_name) LIKE LOWER(?)
+                WHERE LOWER(commodity_name) LIKE LOWER(%s)
                 ORDER BY commodity_name
             """
             cursor.execute(query, (f"{first_word}%",))
@@ -327,7 +401,7 @@ class EPPOLookup:
             return constructed_eppo, commodity_tuples
             
         finally:
-            conn.close()
+            self._return_connection(conn)
     
     def enhanced_lookup_ipaffs(self, genus_species: str) -> Tuple[str, List[Tuple]]:
         """
@@ -402,7 +476,7 @@ def main():
             print(f"  Total records: {stats['total_records']:,}")
             print(f"  Unique commodities: {stats['unique_commodities']:,}")
             print(f"  Unique EPPO codes: {stats['unique_eppo_codes']:,}")
-            print(f"  Database size: {stats['database_size_mb']} MB")
+            print(f"  Database type: {stats['database_type']}")
             
         elif sys.argv[1] == "search" and len(sys.argv) > 2:
             search_term = " ".join(sys.argv[2:])
@@ -428,7 +502,7 @@ def main():
     
     except FileNotFoundError as e:
         print(f"Error: {e}")
-        print("Make sure to run csv_to_sqlite_eppo.py first to create the database.")
+        print("Please ensure the PostgreSQL database is accessible and contains the EPPO data.")
     except Exception as e:
         print(f"Error: {e}")
 
