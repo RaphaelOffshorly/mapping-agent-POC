@@ -2515,8 +2515,82 @@ def prefill_ipaffs():
         # Process each genus/species entry
         eppo_codes = []
         commodity_options = []  # List of options for each row
+        existing_commodity_codes = []  # Track existing commodity codes to preserve them
         
-        for genus_species in genus_species_data:
+        # First, extract existing commodity codes from the data
+        if is_array_format and array_of_objects_field and array_of_objects_field in extracted_data:
+            # Array of objects format - extract existing commodity codes
+            objects_array = extracted_data[array_of_objects_field]
+            if objects_array and len(objects_array) > 0:
+                first_obj = objects_array[0]
+                object_columns = list(first_obj.keys())
+                
+                # Find commodity code column using flexible matching
+                def find_commodity_code_column(columns):
+                    for column in columns:
+                        column_lower = column.lower().strip()
+                        if ('commodity' in column_lower and 'code' in column_lower):
+                            return column
+                    return None
+                
+                commodity_code_col = find_commodity_code_column(object_columns)
+                
+                if commodity_code_col:
+                    for obj in objects_array:
+                        existing_code = obj.get(commodity_code_col, '')
+                        # Only consider non-empty, non-whitespace codes as existing
+                        if existing_code and str(existing_code).strip() != '':
+                            existing_commodity_codes.append(str(existing_code).strip())
+                            logger.info(f"Found existing commodity code: {existing_code}")
+                        else:
+                            existing_commodity_codes.append('')
+                else:
+                    existing_commodity_codes = [''] * len(objects_array)
+            else:
+                existing_commodity_codes = [''] * len(genus_species_data)
+        elif target_columns and sample_data:
+            # Multi-row format - extract existing commodity codes
+            # Find commodity code column using flexible matching
+            def find_commodity_code_column(columns):
+                for column in columns:
+                    column_lower = column.lower().strip()
+                    if ('commodity' in column_lower and 'code' in column_lower):
+                        return column
+                return None
+            
+            commodity_code_col = find_commodity_code_column(target_columns)
+            
+            if commodity_code_col and commodity_code_col in sample_data:
+                existing_codes = sample_data[commodity_code_col]
+                for code in existing_codes:
+                    # Only consider non-empty, non-whitespace codes as existing
+                    if code and str(code).strip() != '':
+                        existing_commodity_codes.append(str(code).strip())
+                        logger.info(f"Found existing commodity code: {code}")
+                    else:
+                        existing_commodity_codes.append('')
+            else:
+                existing_commodity_codes = [''] * len(genus_species_data)
+        else:
+            # Single row format
+            existing_code = ''
+            for field in extracted_data.keys():
+                if 'commodity' in field.lower() and 'code' in field.lower():
+                    value = extracted_data.get(field, '')
+                    if value and str(value).strip() != '':
+                        existing_code = str(value).strip()
+                        logger.info(f"Found existing commodity code: {existing_code}")
+                        break
+            existing_commodity_codes = [existing_code]
+        
+        logger.info(f"Existing commodity codes: {existing_commodity_codes}")
+        
+        for i, genus_species in enumerate(genus_species_data):
+            # Check if this row already has a commodity code (non-empty and non-whitespace)
+            has_existing_code = (i < len(existing_commodity_codes) and 
+                               existing_commodity_codes[i] and 
+                               existing_commodity_codes[i].strip() != '')
+            
             if not genus_species or genus_species.strip() == '':
                 eppo_codes.append('')
                 commodity_options.append([])
@@ -2530,43 +2604,49 @@ def prefill_ipaffs():
                 if eppo_code:
                     eppo_codes.append(eppo_code)
                     
-                    # Filter results to only include valid commodity codes for dropdown options
-                    filtered_results = commodity_filter.filter_eppo_results(results)
-                    
-                    if filtered_results:
-                        # Create commodity code options (only valid codes)
-                        options = []
-                        for commodity_name, eppo, commodity_code, description in filtered_results:
-                            options.append({
-                                'code': commodity_code,
-                                'description': description,
-                                'display': f"{commodity_code} - {description}"
-                            })
-                        commodity_options.append(options)
+                    # Only generate commodity options if no existing code is present
+                    if not has_existing_code:
+                        # Filter results to only include valid commodity codes for dropdown options
+                        filtered_results = commodity_filter.filter_eppo_results(results)
                         
-                        logger.info(f"Enhanced IPAFFS lookup found {len(filtered_results)} valid commodity codes for '{genus_species}' with EPPO code '{eppo_code}'")
-                    else:
-                        # No valid commodity codes found after filtering
-                        # This can happen when we construct an EPPO code but have no matching results in DB
-                        # or when results don't match the valid commodity code filter
-                        
-                        # If we have results but they're filtered out, create options from all valid codes
-                        if results:
-                            # Create options from all valid commodity codes (from the hardcoded list)
-                            # Import the hardcoded commodity codes from eppo_lookup module
-                            from eppo_lookup import COMMODITY_CODES
+                        if filtered_results:
+                            # Create commodity code options (only valid codes)
                             options = []
-                            for code, description in COMMODITY_CODES.items():
+                            for commodity_name, eppo, commodity_code, description in filtered_results:
                                 options.append({
-                                    'code': code,
+                                    'code': commodity_code,
                                     'description': description,
-                                    'display': f"{code} - {description}"
+                                    'display': f"{commodity_code} - {description}"
                                 })
                             commodity_options.append(options)
-                            logger.info(f"IPAFFS lookup used fallback: providing all valid commodity codes for '{genus_species}' with constructed EPPO code '{eppo_code}'")
+                            
+                            logger.info(f"Enhanced IPAFFS lookup found {len(filtered_results)} valid commodity codes for '{genus_species}' with EPPO code '{eppo_code}'")
                         else:
-                            commodity_options.append([])
-                            logger.info(f"No commodity codes found for '{genus_species}' with EPPO code '{eppo_code}'")
+                            # No valid commodity codes found after filtering
+                            # This can happen when we construct an EPPO code but have no matching results in DB
+                            # or when results don't match the valid commodity code filter
+                            
+                            # If we have results but they're filtered out, create options from all valid codes
+                            if results:
+                                # Create options from all valid commodity codes (from the hardcoded list)
+                                # Import the hardcoded commodity codes from eppo_lookup module
+                                from eppo_lookup import COMMODITY_CODES
+                                options = []
+                                for code, description in COMMODITY_CODES.items():
+                                    options.append({
+                                        'code': code,
+                                        'description': description,
+                                        'display': f"{code} - {description}"
+                                    })
+                                commodity_options.append(options)
+                                logger.info(f"IPAFFS lookup used fallback: providing all valid commodity codes for '{genus_species}' with constructed EPPO code '{eppo_code}'")
+                            else:
+                                commodity_options.append([])
+                                logger.info(f"No commodity codes found for '{genus_species}' with EPPO code '{eppo_code}'")
+                    else:
+                        # Row has existing commodity code - don't generate options
+                        commodity_options.append([])
+                        logger.info(f"Preserving existing commodity code for '{genus_species}' - no dropdown options generated")
                 else:
                     eppo_codes.append('')
                     commodity_options.append([])
@@ -2803,6 +2883,27 @@ def prefill_ipaffs():
                         logger.info(f"Created new EPPO code column with {len(eppo_codes)} codes")
                     else:
                         logger.info("Skipped creating new EPPO code column - existing EPPO data found")
+                
+                # Find commodity code column and preserve existing codes
+                def find_commodity_code_column(columns):
+                    for column in columns:
+                        column_lower = column.lower().strip()
+                        if ('commodity' in column_lower and 'code' in column_lower):
+                            return column
+                    return None
+                
+                commodity_code_col = find_commodity_code_column(target_columns)
+                
+                if commodity_code_col and commodity_code_col in updated_sample_data:
+                    existing_commodity_data = updated_sample_data[commodity_code_col]
+                    preserved_count = 0
+                    for i, existing_value in enumerate(existing_commodity_data):
+                        if existing_value and str(existing_value).strip():
+                            preserved_count += 1
+                            logger.info(f"Preserved existing commodity code for row {i}: '{existing_value}'")
+                    logger.info(f"Preserved {preserved_count} existing commodity codes in column '{commodity_code_col}'")
+                else:
+                    logger.info("No commodity code column found for preservation")
                 
                 # Find intended users column
                 intended_col = find_intended_users_column(target_columns)

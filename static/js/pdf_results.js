@@ -1100,19 +1100,28 @@ document.addEventListener('DOMContentLoaded', function() {
                 // Check if this is a commodity code column and we have options
                 if (colIndex === commodityCodeColIndex && window.commodityOptions && window.commodityOptions[rowIndex]) {
                     const options = window.commodityOptions[rowIndex];
-                    if (options && options.length > 0) {
-                        // Create dropdown for commodity code selection
+                    
+                    // If we have an existing extracted commodity code (non-empty and non-whitespace), preserve it instead of showing dropdown
+                    if (cellValue && cellValue.trim() !== '' && options && options.length > 0) {
+                        // Show existing commodity code as preserved/read-only
+                        return `
+                            <td style="padding: 6px 10px; border: 1px solid #dee2e6; background-color: #fff3cd; max-width: 200px;" 
+                                title="Extracted commodity code (preserved): ${String(cellValue).replace(/"/g, '&quot;')}">
+                                <i class="bi bi-shield-check text-warning me-1"></i>
+                                <strong>${cellValue}</strong>
+                                <small class="text-muted d-block">Extracted from document</small>
+                            </td>
+                        `;
+                    } else if (options && options.length > 0) {
+                        // Create dropdown for commodity code selection (only when no existing code)
                         const selectId = `commodity_select_${rowIndex}`;
-                        // Check if we should select the first option by default
+                        // For rows without existing codes, use default selection
                         let defaultSelected = false;
                         const optionsHTML = options.map((option, index) => {
                             let isSelected = false;
                             
-                            // If cellValue matches, use it; otherwise use first option as default
-                            if (option.code === cellValue) {
-                                isSelected = true;
-                                defaultSelected = true;
-                            } else if (index === 0 && !defaultSelected && !cellValue) {
+                            // Only auto-select first option if no existing cellValue or cellValue is empty/whitespace
+                            if (index === 0 && !defaultSelected && (!cellValue || cellValue.trim() === '')) {
                                 isSelected = true;
                                 defaultSelected = true;
                             }
@@ -1127,6 +1136,7 @@ document.addEventListener('DOMContentLoaded', function() {
                                     ${options.length > 0 ? '' : '<option value="">No valid commodity codes available</option>'}
                                     ${optionsHTML}
                                 </select>
+                                <small class="text-muted">Select from database</small>
                             </td>
                         `;
                     }
@@ -1226,17 +1236,26 @@ document.addEventListener('DOMContentLoaded', function() {
             const selectedValue = dropdown.value;
             const selectedText = dropdown.options[dropdown.selectedIndex].text;
             
+            // Only save if we have a valid selection
             if (selectedValue) {
                 selectionsToSave.push({
                     rowIndex: rowIndex,
                     selectedValue: selectedValue,
                     selectedText: selectedText
                 });
+                console.log(`Will auto-save row ${rowIndex} (no extracted code): ${selectedValue}`);
             }
         });
         
-        // Save all selections in a single batch to avoid race conditions
-        saveBatchCommoditySelections(selectionsToSave);
+        // Note: We only save selections for rows that actually have dropdowns
+        // Rows with extracted commodity codes are preserved and don't get dropdowns
+        if (selectionsToSave.length > 0) {
+            console.log(`Auto-saving ${selectionsToSave.length} default selections (preserved rows skipped)`);
+            saveBatchCommoditySelections(selectionsToSave);
+        } else {
+            console.log("No dropdown selections to auto-save (all commodity codes preserved from extraction)");
+            window.commodityAutoSaveComplete = true;
+        }
     }
     
     function saveBatchCommoditySelections(selections) {
