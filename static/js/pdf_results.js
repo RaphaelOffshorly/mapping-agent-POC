@@ -1104,8 +1104,8 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (colIndex === commodityCodeColIndex && window.commodityOptions && window.commodityOptions[rowIndex]) {
                     const options = window.commodityOptions[rowIndex];
                     
-                    // If we have an existing extracted commodity code (non-empty and non-whitespace), preserve it instead of showing dropdown
-                    if (cellValue && cellValue.trim() !== '' && options && options.length > 0) {
+                    // If we have an existing extracted commodity code (non-empty, non-whitespace, and not '0' or '0.0'), preserve it instead of showing dropdown
+                    if (cellValue && cellValue.trim() !== '' && cellValue.trim() !== '0' && cellValue.trim() !== '0.0' && options && options.length > 0) {
                         // Show existing commodity code as preserved/read-only
                         return `
                             <td style="padding: 6px 10px; border: 1px solid #dee2e6; background-color: #fff3cd; max-width: 200px;" 
