@@ -2539,7 +2539,7 @@ def prefill_ipaffs():
                     for obj in objects_array:
                         existing_code = obj.get(commodity_code_col, '')
                         # Only consider non-empty, non-whitespace codes as existing
-                        if existing_code and str(existing_code).strip() != '':
+                        if existing_code and str(existing_code).strip() != '' and str(existing_code).strip() not in ['0', '0.0']:
                             existing_commodity_codes.append(str(existing_code).strip())
                             logger.info(f"Found existing commodity code: {existing_code}")
                         else:
@@ -2564,7 +2564,7 @@ def prefill_ipaffs():
                 existing_codes = sample_data[commodity_code_col]
                 for code in existing_codes:
                     # Only consider non-empty, non-whitespace codes as existing
-                    if code and str(code).strip() != '':
+                    if code and str(code).strip() != '' and str(code).strip() not in ['0', '0.0']:
                         existing_commodity_codes.append(str(code).strip())
                         logger.info(f"Found existing commodity code: {code}")
                     else:
@@ -2577,7 +2577,7 @@ def prefill_ipaffs():
             for field in extracted_data.keys():
                 if 'commodity' in field.lower() and 'code' in field.lower():
                     value = extracted_data.get(field, '')
-                    if value and str(value).strip() != '':
+                    if value and str(value).strip() != '' and str(value).strip() not in ['0', '0.0']:
                         existing_code = str(value).strip()
                         logger.info(f"Found existing commodity code: {existing_code}")
                         break
