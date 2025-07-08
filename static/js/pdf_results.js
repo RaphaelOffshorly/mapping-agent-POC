@@ -89,10 +89,13 @@ document.addEventListener('DOMContentLoaded', function() {
                                 if (value === 'empty') {
                                     value = '';
                                 } else {
-                                    // Try to convert numbers
-                                    const numValue = Number(value);
-                                    if (!isNaN(numValue) && value !== '') {
-                                        value = numValue;
+                                    // Try to convert numbers, but only for non-empty strings
+                                    // and exclude commodity code fields to prevent empty -> 0.0 conversion
+                                    if (value && value.trim() !== '' && !key.toLowerCase().includes('commodity')) {
+                                        const numValue = Number(value);
+                                        if (!isNaN(numValue)) {
+                                            value = numValue;
+                                        }
                                     }
                                 }
                                 
