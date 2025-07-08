@@ -2589,7 +2589,8 @@ def prefill_ipaffs():
             # Check if this row already has a commodity code (non-empty and non-whitespace)
             has_existing_code = (i < len(existing_commodity_codes) and 
                                existing_commodity_codes[i] and 
-                               existing_commodity_codes[i].strip() != '')
+                               existing_commodity_codes[i].strip() != '' and
+                               existing_commodity_codes[i].strip() not in ['0', '0.0'])
             
             if not genus_species or genus_species.strip() == '':
                 eppo_codes.append('')
