@@ -92,6 +92,11 @@ def pdf_upload():
     """Route for the PDF upload page"""
     return render_template('pdf_upload.html')
 
+@app.route('/ipaffs_upload')
+def ipaffs_upload():
+    """Route for the IPAFFS upload page"""
+    return render_template('ipaffs_upload.html')
+
 @app.route('/generate_schema', methods=['POST'])
 def generate_schema():
     """API endpoint to generate a schema from an Excel file"""
@@ -285,6 +290,94 @@ def extract_pdf():
 
     except Exception as e:
         logger.error(f"Error extracting PDF data: {e}")
+        return jsonify({'error': str(e)})
+
+@app.route('/extract_ipaffs_pdf', methods=['POST'])
+def extract_ipaffs_pdf():
+    """API endpoint to extract data from a PDF file using the IPAFFS schema"""
+    if 'pdf_file' not in request.files:
+        return jsonify({'error': 'No PDF file provided'})
+
+    pdf_file = request.files['pdf_file']
+
+    if pdf_file.filename == '':
+        return jsonify({'error': 'No selected file'})
+
+    if not pdf_file.filename.endswith('.pdf'):
+        return jsonify({'error': 'File must be a PDF'})
+
+    try:
+        # Load the IPAFFS schema automatically
+        ipaffs_schema_path = os.path.join(os.getcwd(), 'ipaffs_schema.json')
+        if not os.path.exists(ipaffs_schema_path):
+            return jsonify({'error': 'IPAFFS schema file not found'})
+
+        # Load the schema data
+        with open(ipaffs_schema_path, 'r') as f:
+            schema_data = json.load(f)
+        
+        logger.info(f"Loaded IPAFFS schema with {len(schema_data.get('properties', {}))} properties")
+
+        # Create a temporary schema file for the agent
+        schema_filename = f"temp_ipaffs_schema_{int(time.time())}.json"
+        schema_filepath = os.path.join(app.config['UPLOAD_FOLDER'], schema_filename)
+        
+        with open(schema_filepath, 'w') as f:
+            json.dump(schema_data, f, indent=2)
+            
+        logger.info(f"Created temporary IPAFFS schema file: {schema_filepath}")
+
+        # Save the PDF file temporarily
+        pdf_filename = secure_filename(pdf_file.filename)
+        pdf_filepath = os.path.join(app.config['UPLOAD_FOLDER'], f"temp_ipaffs_{pdf_filename}")
+        pdf_file.save(pdf_filepath)
+
+        # Initialize the PDF extract agent
+        pdf_agent = PDFExtractAgent(verbose=True)
+
+        # Run the agent
+        state = {
+            'schema_path': schema_filepath,
+            'pdf_path': pdf_filepath
+        }
+        result = pdf_agent.run(state)
+
+        if result.get('error'):
+            return jsonify({'error': result['error']})
+
+        # Get the extracted data
+        extracted_data = result.get('data', {})
+
+        # Store the data in session
+        session['filename'] = pdf_filename
+        session['pdf_filepath'] = pdf_filepath
+        session['extracted_data'] = extracted_data
+        session['schema_filepath'] = schema_filepath
+        
+        # Generate column descriptions from IPAFFS schema
+        column_descriptions = {}
+        if 'properties' in schema_data:
+            for field, props in schema_data['properties'].items():
+                description = props.get('description', f"IPAFFS data extracted from PDF for {field}")
+                data_type = props.get('type', 'string')
+                column_descriptions[field] = {
+                    'description': description,
+                    'data_type': data_type,
+                    'sample_values': []
+                }
+        
+        # Store the column descriptions in session
+        session['column_descriptions'] = column_descriptions
+
+        logger.info(f"IPAFFS PDF extraction completed successfully for {pdf_filename}")
+
+        return jsonify({
+            'success': True,
+            'redirect': '/pdf_results'
+        })
+
+    except Exception as e:
+        logger.error(f"Error extracting IPAFFS PDF data: {e}")
         return jsonify({'error': str(e)})
 
 @app.route('/get_sheets', methods=['POST'])

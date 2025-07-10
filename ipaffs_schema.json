@@ -1,0 +1,136 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "Items": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "Class": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Without sample values provided, I can only infer that the \"Class\" column likely represents a classification or category that items or records belong to, possibly indicating groupings such as product classes, customer segments, or quality classifications."
+          },
+          "Commodity code": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The \"Commodity code\" column represents unique numerical identifiers assigned to different types of products or goods for classification and tracking purposes in inventory or trade systems."
+          },
+          "Controlled atmosphere container": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "This column indicates whether a shipping container has a controlled atmosphere system installed to regulate environmental conditions during transport."
+          },
+          "Eppocode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Employee position or project codes representing unique identifiers for job classifications or assignments within the organization."
+          },
+          "Genus and Species": {
+            "description": "Scientific name of the product or plants for planting. For example, \"Rosa hybrid\" for hybrid roses.",
+            "type": "string"
+          },
+          "Intended for final users (or commercial flower production)": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "This column indicates whether the plant product is ready for end consumers or commercial flower growers, with \"Finished\" signifying products that are market-ready."
+          },
+          "Net weight (kg)": {
+            "description": "The net weight of products measured in kilograms. Can be found in the invoice.",
+            "type": "number"
+          },
+          "Number of packages": {
+            "description": "The quantity of packages of each product.",
+            "type": "number"
+          },
+          "Quantity": {
+            "description": "The numerical count or amount of products included in each transaction or order.",
+            "type": "number"
+          },
+          "Quantity type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Description: This column indicates the unit of measure for inventory or sales items, with \"PCS\" representing pieces or individual units of a product."
+          },
+          "Type of package": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "This column indicates the category or format of packaging used for a product or service, though the sample values are empty."
+          },
+          "Variety": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "This column represents the specific type or classification of wine, grape, or agricultural product being analyzed or sold."
+          }
+        },
+        "required": [
+          "Class",
+          "Commodity code",
+          "Controlled atmosphere container",
+          "Eppocode",
+          "Genus and Species",
+          "Intended for final users (or commercial flower production)",
+          "Net weight (kg)",
+          "Number of packages",
+          "Quantity",
+          "Quantity type",
+          "Type of package",
+          "Variety"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "Items"
+  ],
+  "type": "object"
+}
