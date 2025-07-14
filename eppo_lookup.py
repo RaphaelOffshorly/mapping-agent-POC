@@ -10,9 +10,13 @@ import psycopg2.extras
 import psycopg2.pool
 import os
 import re
-from typing import List, Tuple, Optional, Dict
+import time
+from typing import List, Tuple, Optional, Dict, Union
 from urllib.parse import urlparse
 from dotenv import load_dotenv
+from contextlib import contextmanager
+from functools import lru_cache
+import threading
 
 # Load environment variables
 load_dotenv()
@@ -437,6 +441,280 @@ class EPPOLookup:
         
         # Step 3: Try first word only approach (IPAFFS guide)
         return self.lookup_by_first_word_ipaffs(genus_species)
+    
+    # ===================== BATCH OPERATIONS =====================
+    
+    @contextmanager
+    def get_shared_connection(self):
+        """Context manager for sharing a connection across multiple operations."""
+        conn = self.get_connection()
+        try:
+            yield conn
+        finally:
+            self._return_connection(conn)
+    
+    def batch_lookup_by_commodity_names(self, commodity_names: List[str], exact_match: bool = True) -> Dict[str, List[Tuple]]:
+        """
+        Batch lookup EPPO codes by multiple commodity names.
+        
+        Args:
+            commodity_names: List of commodity names to search for
+            exact_match: If True, searches for exact matches. If False, searches for partial matches.
+        
+        Returns:
+            Dictionary mapping commodity names to their lookup results
+        """
+        if not commodity_names:
+            return {}
+        
+        # Clean all commodity names
+        cleaned_names = [self.clean_genus_species(name) for name in commodity_names]
+        
+        with self.get_shared_connection() as conn:
+            cursor = conn.cursor()
+            
+            if exact_match:
+                # Use unnest for exact matches
+                query = """
+                    SELECT input_name, commodity_name, eppo_code, commodity_code, commodity_code_description
+                    FROM unnest(%s) AS input_name
+                    LEFT JOIN eppo_codes ON LOWER(eppo_codes.commodity_name) = LOWER(input_name)
+                    ORDER BY input_name, commodity_name
+                """
+                cursor.execute(query, (cleaned_names,))
+            else:
+                # For partial matches, we need to handle each name individually but in a single query
+                conditions = []
+                params = []
+                for i, name in enumerate(cleaned_names):
+                    conditions.append(f"LOWER(commodity_name) LIKE LOWER(%s)")
+                    params.append(f"%{name}%")
+                
+                query = f"""
+                    SELECT commodity_name, eppo_code, commodity_code, commodity_code_description
+                    FROM eppo_codes 
+                    WHERE {' OR '.join(conditions)}
+                    ORDER BY commodity_name
+                """
+                cursor.execute(query, params)
+            
+            results = cursor.fetchall()
+            
+            # Organize results by original commodity name
+            result_dict = {}
+            for original_name, cleaned_name in zip(commodity_names, cleaned_names):
+                result_dict[original_name] = []
+            
+            if exact_match:
+                for result in results:
+                    input_name = result[0]
+                    if result[1] is not None:  # Only add if there's a match
+                        match_result = result[1:]  # Remove input_name from result
+                        # Find original name that corresponds to this cleaned name
+                        for orig_name, clean_name in zip(commodity_names, cleaned_names):
+                            if clean_name == input_name:
+                                result_dict[orig_name].append(match_result)
+                                break
+            else:
+                # For partial matches, we need to determine which original name each result belongs to
+                for result in results:
+                    commodity_name = result[0].lower()
+                    for orig_name, clean_name in zip(commodity_names, cleaned_names):
+                        if clean_name.lower() in commodity_name:
+                            result_dict[orig_name].append(result)
+                            break
+            
+            return result_dict
+    
+    def batch_lookup_by_eppo_codes(self, eppo_codes: List[str]) -> Dict[str, List[Tuple]]:
+        """
+        Batch lookup commodity information by multiple EPPO codes.
+        
+        Args:
+            eppo_codes: List of EPPO codes to search for
+        
+        Returns:
+            Dictionary mapping EPPO codes to their lookup results
+        """
+        if not eppo_codes:
+            return {}
+        
+        with self.get_shared_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Use unnest for batch lookup
+            query = """
+                SELECT input_code, commodity_name, eppo_code, commodity_code, commodity_code_description
+                FROM unnest(%s) AS input_code
+                LEFT JOIN eppo_codes ON UPPER(eppo_codes.eppo_code) = UPPER(input_code)
+                ORDER BY input_code, commodity_name
+            """
+            cursor.execute(query, (eppo_codes,))
+            results = cursor.fetchall()
+            
+            # Organize results by EPPO code
+            result_dict = {code: [] for code in eppo_codes}
+            
+            for result in results:
+                input_code = result[0]
+                if result[1] is not None:  # Only add if there's a match
+                    match_result = result[1:]  # Remove input_code from result
+                    result_dict[input_code].append(match_result)
+            
+            return result_dict
+    
+    def batch_enhanced_lookup_ipaffs(self, genus_species_list: List[str]) -> Dict[str, Tuple[str, List[Tuple]]]:
+        """
+        Batch enhanced IPAFFS lookup for multiple genus-species pairs.
+        
+        Args:
+            genus_species_list: List of genus and species names
+        
+        Returns:
+            Dictionary mapping original names to (eppo_code, results) tuples
+        """
+        if not genus_species_list:
+            return {}
+        
+        result_dict = {}
+        
+        # Step 1: Try exact matches for all names at once
+        exact_results = self.batch_lookup_by_commodity_names(genus_species_list, exact_match=True)
+        
+        # Step 2: Collect names that didn't get exact matches
+        remaining_names = []
+        for name in genus_species_list:
+            if exact_results.get(name) and exact_results[name]:
+                # Found exact match
+                first_result = exact_results[name][0]
+                result_dict[name] = (first_result[1], exact_results[name])  # eppo_code, results
+            else:
+                remaining_names.append(name)
+        
+        # Step 3: Try partial matches for remaining names
+        if remaining_names:
+            partial_results = self.batch_lookup_by_commodity_names(remaining_names, exact_match=False)
+            
+            still_remaining = []
+            for name in remaining_names:
+                if partial_results.get(name) and partial_results[name]:
+                    # Try to find best partial match
+                    words = name.lower().split()
+                    best_match = None
+                    
+                    if len(words) >= 2:
+                        for result in partial_results[name]:
+                            commodity_name = result[0].lower()
+                            if all(word in commodity_name for word in words):
+                                best_match = result
+                                break
+                    
+                    if best_match:
+                        result_dict[name] = (best_match[1], [best_match])
+                    else:
+                        # Use first partial match
+                        first_result = partial_results[name][0]
+                        result_dict[name] = (first_result[1], partial_results[name])
+                else:
+                    still_remaining.append(name)
+            
+            # Step 4: Use first word approach for names still without matches
+            for name in still_remaining:
+                eppo_code, results = self.lookup_by_first_word_ipaffs(name)
+                result_dict[name] = (eppo_code, results)
+        
+        return result_dict
+    
+    # ===================== CACHING =====================
+    
+    @lru_cache(maxsize=1000)
+    def _cached_lookup_by_commodity_name(self, commodity_name: str, exact_match: bool = True) -> Tuple[Tuple, ...]:
+        """Cached version of lookup_by_commodity_name (returns tuple for hashability)."""
+        results = self.lookup_by_commodity_name(commodity_name, exact_match)
+        return tuple(results)
+    
+    @lru_cache(maxsize=1000)
+    def _cached_lookup_by_eppo_code(self, eppo_code: str) -> Tuple[Tuple, ...]:
+        """Cached version of lookup_by_eppo_code (returns tuple for hashability)."""
+        results = self.lookup_by_eppo_code(eppo_code)
+        return tuple(results)
+    
+    def cached_lookup_by_commodity_name(self, commodity_name: str, exact_match: bool = True) -> List[Tuple]:
+        """
+        Cached lookup by commodity name (converts back to list).
+        
+        Args:
+            commodity_name: The commodity name to search for
+            exact_match: If True, searches for exact match. If False, searches for partial matches.
+        
+        Returns:
+            List of tuples containing (commodity_name, eppo_code, commodity_code, description)
+        """
+        return list(self._cached_lookup_by_commodity_name(commodity_name, exact_match))
+    
+    def cached_lookup_by_eppo_code(self, eppo_code: str) -> List[Tuple]:
+        """
+        Cached lookup by EPPO code (converts back to list).
+        
+        Args:
+            eppo_code: The EPPO code to search for
+        
+        Returns:
+            List of tuples containing (commodity_name, eppo_code, commodity_code, description)
+        """
+        return list(self._cached_lookup_by_eppo_code(eppo_code))
+    
+    # ===================== PERFORMANCE UTILITIES =====================
+    
+    def benchmark_lookup_methods(self, test_names: List[str], iterations: int = 10) -> Dict[str, float]:
+        """
+        Benchmark different lookup methods for performance comparison.
+        
+        Args:
+            test_names: List of commodity names to test with
+            iterations: Number of iterations to run each test
+        
+        Returns:
+            Dictionary with method names and their average execution times
+        """
+        results = {}
+        
+        # Test individual lookups
+        start_time = time.time()
+        for _ in range(iterations):
+            for name in test_names:
+                self.lookup_by_commodity_name(name)
+        individual_time = (time.time() - start_time) / iterations
+        results['individual_lookup'] = individual_time
+        
+        # Test batch lookups
+        start_time = time.time()
+        for _ in range(iterations):
+            self.batch_lookup_by_commodity_names(test_names)
+        batch_time = (time.time() - start_time) / iterations
+        results['batch_lookup'] = batch_time
+        
+        # Test cached lookups
+        start_time = time.time()
+        for _ in range(iterations):
+            for name in test_names:
+                self.cached_lookup_by_commodity_name(name)
+        cached_time = (time.time() - start_time) / iterations
+        results['cached_lookup'] = cached_time
+        
+        return results
+    
+    def clear_cache(self):
+        """Clear the LRU cache."""
+        self._cached_lookup_by_commodity_name.cache_clear()
+        self._cached_lookup_by_eppo_code.cache_clear()
+    
+    def get_cache_info(self) -> Dict[str, dict]:
+        """Get cache statistics."""
+        return {
+            'commodity_name_cache': self._cached_lookup_by_commodity_name.cache_info()._asdict(),
+            'eppo_code_cache': self._cached_lookup_by_eppo_code.cache_info()._asdict()
+        }
 
 def print_results(results: List[Tuple], title: str = "Results"):
     """Print search results in a formatted way."""

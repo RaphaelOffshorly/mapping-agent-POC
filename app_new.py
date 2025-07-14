@@ -2864,8 +2864,8 @@ def prefill_ipaffs():
                             if intended_col:
                                 current_value = obj.get(intended_col, '')
                                 if not current_value or str(current_value).strip() == '':
-                                    obj[intended_col] = 'No'
-                                    logger.info(f"Updated object {i} intended column '{intended_col}' with 'No'")
+                                    obj[intended_col] = 'Yes'
+                                    logger.info(f"Updated object {i} intended column '{intended_col}' with 'Yes'")
                                 else:
                                     logger.info(f"Skipped object {i} intended column '{intended_col}' - already has value: '{current_value}'")
                             else:
@@ -2878,8 +2878,8 @@ def prefill_ipaffs():
                                         break
                                 
                                 if not has_existing_intended:
-                                    obj['Intended for final users'] = 'No'
-                                    logger.info(f"Created new intended users field for object {i} with 'No'")
+                                    obj['Intended for final users'] = 'Yes'
+                                    logger.info(f"Created new intended users field for object {i} with 'Yes'")
                                 else:
                                     logger.info(f"Skipped creating intended users field for object {i} - existing data found")
 
@@ -2911,8 +2911,8 @@ def prefill_ipaffs():
                             if type_of_package_col:
                                 current_value = obj.get(type_of_package_col, '')
                                 if not current_value or str(current_value).strip() == '':
-                                    obj[type_of_package_col] = 'Other'
-                                    logger.info(f"Updated object {i} type of package column '{type_of_package_col}' with 'Other'")
+                                    obj[type_of_package_col] = 'PK'
+                                    logger.info(f"Updated object {i} type of package column '{type_of_package_col}' with 'PK'")
                                 else:
                                     logger.info(f"Skipped object {i} type of package column '{type_of_package_col}' - already has value: '{current_value}'")
                             else:
@@ -2925,8 +2925,8 @@ def prefill_ipaffs():
                                         break
                                 
                                 if not has_existing_package:
-                                    obj['Type of package'] = 'Other'
-                                    logger.info(f"Created new type of package field for object {i} with 'Other'")
+                                    obj['Type of package'] = 'PK'
+                                    logger.info(f"Created new type of package field for object {i} with 'PK'")
                                 else:
                                     logger.info(f"Skipped creating type of package field for object {i} - existing data found")
                 
@@ -3007,12 +3007,12 @@ def prefill_ipaffs():
                     updated_count = 0
                     for i in range(len(intended_data)):
                         if not intended_data[i] or str(intended_data[i]).strip() == '':
-                            intended_data[i] = 'No'
+                            intended_data[i] = 'Yes'
                             updated_count += 1
                         else:
                             logger.info(f"Kept existing intended users value for row {i}: '{intended_data[i]}'")
                     updated_sample_data[intended_col] = intended_data
-                    logger.info(f"Updated existing intended users column '{intended_col}' - filled {updated_count} empty values with 'No'")
+                    logger.info(f"Updated existing intended users column '{intended_col}' - filled {updated_count} empty values with 'Yes'")
                 else:
                     # Check if any existing column has intended users data before creating new column
                     has_existing_intended_data = False
@@ -3027,8 +3027,8 @@ def prefill_ipaffs():
                     if not has_existing_intended_data:
                         # Create new column
                         target_columns.append('Intended for final users')
-                        updated_sample_data['Intended for final users'] = ['No'] * len(genus_species_data)
-                        logger.info(f"Created new intended users column with {len(genus_species_data)} 'No' values")
+                        updated_sample_data['Intended for final users'] = ['Yes'] * len(genus_species_data)
+                        logger.info(f"Created new intended users column with {len(genus_species_data)} 'Yes' values")
                     else:
                         logger.info("Skipped creating new intended users column - existing data found")
 
@@ -3071,12 +3071,12 @@ def prefill_ipaffs():
                     updated_count = 0
                     for i in range(len(type_of_package_data)):
                         if not type_of_package_data[i] or str(type_of_package_data[i]).strip() == '':
-                            type_of_package_data[i] = 'Other'
+                            type_of_package_data[i] = 'PK'
                             updated_count += 1
                         else:
                             logger.info(f"Kept existing type of package value for row {i}: '{type_of_package_data[i]}'")
                     updated_sample_data[type_of_package_col] = type_of_package_data
-                    logger.info(f"Updated existing type of package column '{type_of_package_col}' - filled {updated_count} empty values with 'Other'")
+                    logger.info(f"Updated existing type of package column '{type_of_package_col}' - filled {updated_count} empty values with 'PK'")
                 else:
                     # Check if any existing column has type of package data before creating new column
                     has_existing_package_data = False
@@ -3091,8 +3091,8 @@ def prefill_ipaffs():
                     if not has_existing_package_data:
                         # Create new column
                         target_columns.append('Type of package')
-                        updated_sample_data['Type of package'] = ['Other'] * len(genus_species_data)
-                        logger.info(f"Created new type of package column with {len(genus_species_data)} 'Other' values")
+                        updated_sample_data['Type of package'] = ['PK'] * len(genus_species_data)
+                        logger.info(f"Created new type of package column with {len(genus_species_data)} 'PK' values")
                     else:
                         logger.info("Skipped creating new type of package column - existing data found")
                 
@@ -3144,8 +3144,8 @@ def prefill_ipaffs():
             if intended_field:
                 current_value = updated_extracted_data.get(intended_field, '')
                 if not current_value or str(current_value).strip() == '':
-                    updated_extracted_data[intended_field] = 'No'
-                    logger.info(f"Updated single row intended field '{intended_field}' with 'No'")
+                    updated_extracted_data[intended_field] = 'Yes'
+                    logger.info(f"Updated single row intended field '{intended_field}' with 'Yes'")
                 else:
                     logger.info(f"Skipped single row intended field '{intended_field}' - already has value: '{current_value}'")
             else:
@@ -3158,8 +3158,8 @@ def prefill_ipaffs():
                         break
                 
                 if not has_existing_intended:
-                    updated_extracted_data['Intended for final users'] = 'No'
-                    logger.info("Created new intended users field for single row with 'No'")
+                    updated_extracted_data['Intended for final users'] = 'Yes'
+                    logger.info("Created new intended users field for single row with 'Yes'")
                 else:
                     logger.info("Skipped creating intended users field - existing data found")
             
