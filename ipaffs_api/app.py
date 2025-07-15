@@ -13,6 +13,7 @@ sys.path.append('..')
 
 # Import existing modules and agents
 from eppo_lookup import EPPOLookup
+from eppo_lookup_optimized import EPPOLookupOptimized
 from utils.commodity_filter import get_commodity_filter
 from agents.pdf_extract_agent import PDFExtractAgent
 from agents.csv_edit_supervisor import CSVEditSupervisorAgent
@@ -56,6 +57,9 @@ pdf_service = PDFExtractionService()
 # Initialize global EPPO lookup instance
 eppo_lookup_instance = None
 
+# Initialize global EPPO lookup instances
+eppo_lookup_optimized_instance = None
+
 def get_eppo_lookup():
     """Get the global EPPO lookup instance."""
     global eppo_lookup_instance
@@ -68,6 +72,19 @@ def get_eppo_lookup():
             eppo_lookup_instance = EPPOLookup(use_pool=False)
             logger.info("EPPO lookup instance initialized without pooling (fallback)")
     return eppo_lookup_instance
+
+def get_eppo_lookup_optimized():
+    """Get the global optimized EPPO lookup instance."""
+    global eppo_lookup_optimized_instance
+    if eppo_lookup_optimized_instance is None:
+        try:
+            eppo_lookup_optimized_instance = EPPOLookupOptimized(use_pool=True)
+            logger.info("Global optimized EPPO lookup instance initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize optimized EPPO lookup instance: {e}")
+            logger.info("Falling back to standard EPPO lookup")
+            return get_eppo_lookup()
+    return eppo_lookup_optimized_instance
 
 # Health check endpoint
 @app.route('/api/v1/health', methods=['GET'])
@@ -280,7 +297,7 @@ def prefill_eppo():
             )
         
         # Initialize EPPO lookup and commodity filter
-        lookup = get_eppo_lookup()
+        lookup = get_eppo_lookup_optimized()
         commodity_filter = get_commodity_filter()
         
         headers = csv_data.get('headers', [])
@@ -304,47 +321,79 @@ def prefill_eppo():
         for row in data_rows:
             genus_species_data.append(row.get(genus_species_col, ''))
         
-        # Process each genus/species entry
-        eppo_codes = []
-        commodity_options = []
+        # Filter out empty entries for batch processing
+        non_empty_entries = [(i, name) for i, name in enumerate(genus_species_data) if name and name.strip()]
         
-        for genus_species in genus_species_data:
-            if not genus_species or genus_species.strip() == '':
-                eppo_codes.append('')
-                commodity_options.append([])
-                continue
-            
+        # Process batch IPAFFS lookup for non-empty entries
+        eppo_codes = [''] * len(genus_species_data)
+        commodity_options = [[] for _ in range(len(genus_species_data))]
+        
+        if non_empty_entries:
             try:
-                # Use enhanced IPAFFS lookup
-                eppo_code, results = lookup.enhanced_lookup_ipaffs(genus_species)
+                # Extract just the names for batch lookup
+                batch_names = [name for _, name in non_empty_entries]
                 
-                if eppo_code:
-                    eppo_codes.append(eppo_code)
-                    
-                    # Filter results for valid commodity codes
-                    filtered_results = commodity_filter.filter_eppo_results(results)
-                    
-                    options = []
-                    if filtered_results:
-                        for commodity_name, eppo, commodity_code, description in filtered_results:
-                            options.append({
-                                'code': commodity_code,
-                                'description': description,
-                                'display': f"{commodity_code} - {description}"
-                            })
-                    
-                    commodity_options.append(options)
-                    
-                    logger.info(f"Found EPPO code '{eppo_code}' for '{genus_species}' with {len(options)} commodity options")
-                else:
-                    eppo_codes.append('')
-                    commodity_options.append([])
-                    logger.info(f"No EPPO code found for '{genus_species}'")
-                    
+                # Use optimized batch IPAFFS lookup
+                batch_results = lookup.batch_ipaffs_lookup(batch_names)
+                
+                logger.info(f"Batch lookup processed {len(batch_names)} entries")
+                
+                # Process batch results
+                for (original_index, genus_species), name in zip(non_empty_entries, batch_names):
+                    if name in batch_results:
+                        eppo_code, results = batch_results[name]
+                        
+                        if eppo_code:
+                            eppo_codes[original_index] = eppo_code
+                            
+                            # Filter results for valid commodity codes
+                            filtered_results = commodity_filter.filter_eppo_results(results)
+                            
+                            options = []
+                            if filtered_results:
+                                for commodity_name, eppo, commodity_code, description in filtered_results:
+                                    options.append({
+                                        'code': commodity_code,
+                                        'description': description,
+                                        'display': f"{commodity_code} - {description}"
+                                    })
+                            
+                            commodity_options[original_index] = options
+                            
+                            logger.info(f"Found EPPO code '{eppo_code}' for '{genus_species}' with {len(options)} commodity options")
+                        else:
+                            logger.info(f"No EPPO code found for '{genus_species}'")
+                    else:
+                        logger.warning(f"No batch result found for '{genus_species}'")
+                        
             except Exception as e:
-                logger.error(f"Error in EPPO lookup for '{genus_species}': {e}")
-                eppo_codes.append('')
-                commodity_options.append([])
+                logger.error(f"Error in batch EPPO lookup: {e}")
+                # Fallback to individual lookups if batch fails
+                for i, genus_species in enumerate(genus_species_data):
+                    if not genus_species or genus_species.strip() == '':
+                        continue
+                    
+                    try:
+                        eppo_code, results = lookup.enhanced_lookup_ipaffs(genus_species)
+                        
+                        if eppo_code:
+                            eppo_codes[i] = eppo_code
+                            
+                            filtered_results = commodity_filter.filter_eppo_results(results)
+                            
+                            options = []
+                            if filtered_results:
+                                for commodity_name, eppo, commodity_code, description in filtered_results:
+                                    options.append({
+                                        'code': commodity_code,
+                                        'description': description,
+                                        'display': f"{commodity_code} - {description}"
+                                    })
+                            
+                            commodity_options[i] = options
+                            
+                    except Exception as e:
+                        logger.error(f"Error in individual EPPO lookup for '{genus_species}': {e}")
         
         # Update CSV data with EPPO codes
         updated_data_rows = []
