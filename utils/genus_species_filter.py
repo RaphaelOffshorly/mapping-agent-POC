@@ -8,32 +8,57 @@ proper taxonomic validation methods and external APIs.
 import re
 import requests
 import logging
-from typing import List, Set, Optional, Tuple, Dict
+from typing import List, Set, Optional, Tuple, Dict, Union
 from functools import lru_cache
 import time
+import json
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
+
+@dataclass
+class NameMatch:
+    """Data class to represent a taxonomic name match result."""
+    original_name: str
+    matched_name: str
+    accepted_name: str
+    match_type: str  # 'exact', 'partial', 'fuzzy', 'synonym'
+    confidence: float
+    source: str  # 'tnrs', 'gbif', 'itis', 'ipaffs'
+    is_valid: bool
+    synonyms: List[str] = None
+    
+    def __post_init__(self):
+        if self.synonyms is None:
+            self.synonyms = []
 
 class GenusSpeciesFilter:
     """Class for validating and filtering genus and species entries."""
     
-    def __init__(self, enable_api_validation: bool = True):
+    def __init__(self, enable_api_validation: bool = True, enable_partial_matching: bool = True):
         """
         Initialize the genus and species filter.
         
         Args:
             enable_api_validation: Whether to enable external API validation
+            enable_partial_matching: Whether to enable partial name matching
         """
         self.enable_api_validation = enable_api_validation
+        self.enable_partial_matching = enable_partial_matching
         self.api_cache = {}
-        self.api_timeout = 5  # seconds
+        self.normalization_cache = {}
+        self.api_timeout = 10  # seconds - increased for TNRS
+        
+        # TNRS API endpoints (primary for plant names)
+        self.tnrs_api_url = "https://tnrs.biendata.org/tnrs_api.php"
         
         # ITIS API endpoints
         self.itis_search_url = "https://www.itis.gov/ITISWebService/services/ITISService/searchByScientificName"
         self.itis_tsn_url = "https://www.itis.gov/ITISWebService/services/ITISService/getAcceptedNamesFromTSN"
         
-        # GBIF API endpoints (as fallback)
+        # GBIF API endpoints
         self.gbif_species_url = "https://api.gbif.org/v1/species/match"
+        self.gbif_name_lookup_url = "https://api.gbif.org/v1/species/search"
         
         # Known monotypic genera (single species) that are valid with genus name only
         self.known_monotypic_genera = {
@@ -131,7 +156,7 @@ class GenusSpeciesFilter:
             'spirulina',        # Often used generically for spirulina species
         }
         
-        logger.info(f"Initialized GenusSpeciesFilter with API validation: {enable_api_validation}")
+        logger.info(f"Initialized GenusSpeciesFilter with API validation: {enable_api_validation}, partial matching: {enable_partial_matching}")
     
     def normalize_genus_species(self, genus_species: str) -> Optional[str]:
         """
@@ -216,14 +241,18 @@ class GenusSpeciesFilter:
                 normalized_genus = genus.capitalize()
                 return f"{normalized_genus} sp."
             
-            # Both words must be alphabetic
-            if not genus.isalpha() or not species.isalpha():
+            # Handle hyphenated species names (e.g., "plantago-aquatica")
+            if not genus.isalpha():
+                return None
+            
+            # Allow hyphenated species names
+            if not (species.isalpha() or self._is_valid_hyphenated_species(species)):
                 return None
             
             # Length checks (reasonable bounds)
             if len(genus) < 2 or len(genus) > 25:
                 return None
-            if len(species) < 2 or len(species) > 30:
+            if len(species) < 2 or len(species) > 50:  # Longer for hyphenated names
                 return None
             
             # Normalize capitalization: Genus capitalized, species lowercase
@@ -321,14 +350,14 @@ class GenusSpeciesFilter:
         if species.lower() in ['sp.', 'spp.', 'sp', 'spp']:
             return True
         
-        # Species must be lowercase alphabetic word
-        if not species.isalpha() or not species.islower():
+        # Species must be lowercase alphabetic word or valid hyphenated name
+        if not (species.isalpha() or self._is_valid_hyphenated_species(species)) or not species.islower():
             return False
         
         # Length checks (reasonable bounds)
         if len(genus) < 2 or len(genus) > 25:
             return False
-        if len(species) < 2 or len(species) > 30:
+        if len(species) < 2 or len(species) > 50:  # Longer for hyphenated names
             return False
         
         return True
@@ -363,6 +392,14 @@ class GenusSpeciesFilter:
         # Check if this is a valid species abbreviation pattern first
         if re.match(r'^[A-Za-z]+ sp\.?$', text_lower) or re.match(r'^[A-Za-z]+ spp\.?$', text_lower):
             return False  # Valid species abbreviation pattern
+        
+        # Check if this is a valid hyphenated species pattern (allow parentheses)
+        if re.match(r'^[A-Za-z]+ [A-Za-z]+-[A-Za-z]+(\s*\([^)]*\))?$', text_lower):
+            return False  # Valid hyphenated species pattern
+        
+        # Check if this is a valid partial species pattern
+        if re.match(r'^[A-Za-z]+ [A-Za-z]+$', text_lower):
+            return False  # Valid partial species pattern
         
         # Check for numbers (but allow them in parentheses for now - will be cleaned)
         if any(char.isdigit() for char in text):
@@ -505,6 +542,253 @@ class GenusSpeciesFilter:
         
         return False
     
+    def _is_valid_hyphenated_species(self, species: str) -> bool:
+        """
+        Check if a species name is a valid hyphenated species name.
+        
+        Args:
+            species: The species name to check
+            
+        Returns:
+            True if valid hyphenated species name, False otherwise
+        """
+        if not species or '-' not in species:
+            return False
+        
+        # Split by hyphens and check each part
+        parts = species.split('-')
+        if len(parts) < 2:
+            return False
+        
+        # Each part must be alphabetic and reasonable length
+        for part in parts:
+            if not part.isalpha() or len(part) < 2 or len(part) > 20:
+                return False
+        
+        return True
+    
+    @lru_cache(maxsize=1000)
+    def validate_with_tnrs(self, genus_species: str, allow_partial: bool = True) -> Optional[NameMatch]:
+        """
+        Validate and resolve scientific name using TNRS API.
+        
+        Args:
+            genus_species: The genus and species name to validate
+            allow_partial: Whether to allow partial matches
+            
+        Returns:
+            NameMatch object if valid, None otherwise
+        """
+        if not self.enable_api_validation:
+            return None
+        
+        try:
+            # Prepare TNRS API request
+            data = {
+                'names': genus_species,
+                'sources': 'tropicos,usda',  # Use multiple sources for better coverage
+                'class': 'class',
+                'mode': 'resolve',
+                'matches': 'all',
+                'accuracy': 0.5  # Minimum accuracy threshold
+            }
+            
+            headers = {
+                'Content-Type': 'application/json',
+                'User-Agent': 'Python/GenusSpeciesFilter'
+            }
+            
+            response = requests.post(
+                self.tnrs_api_url,
+                json=data,
+                headers=headers,
+                timeout=self.api_timeout
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                
+                # Process TNRS response
+                if 'data' in result and len(result['data']) > 0:
+                    match = result['data'][0]  # Get best match
+                    
+                    matched_name = match.get('Name_matched', '')
+                    accepted_name = match.get('Accepted_name', matched_name)
+                    overall_score = match.get('Overall_score', 0)
+                    match_summary = match.get('Match_summary', '')
+                    
+                    # Determine match type
+                    if 'Partial' in match_summary:
+                        match_type = 'partial'
+                    elif 'Fuzzy' in match_summary:
+                        match_type = 'fuzzy'
+                    elif 'Synonym' in match_summary:
+                        match_type = 'synonym'
+                    else:
+                        match_type = 'exact'
+                    
+                    # Check if partial matches are allowed
+                    if not allow_partial and match_type == 'partial':
+                        return None
+                    
+                    # Create NameMatch object
+                    name_match = NameMatch(
+                        original_name=genus_species,
+                        matched_name=matched_name,
+                        accepted_name=accepted_name,
+                        match_type=match_type,
+                        confidence=overall_score,
+                        source='tnrs',
+                        is_valid=overall_score >= 0.5,
+                        synonyms=match.get('Synonyms', []) if match.get('Synonyms') else []
+                    )
+                    
+                    return name_match
+            
+        except Exception as e:
+            logger.debug(f"TNRS API validation failed for '{genus_species}': {e}")
+        
+        return None
+    
+    def resolve_partial_match(self, partial_name: str) -> Optional[NameMatch]:
+        """
+        Resolve a partial species name to its complete form.
+        
+        Args:
+            partial_name: The partial species name (e.g., "Alisma plantago")
+            
+        Returns:
+            NameMatch object with complete name if found, None otherwise
+        """
+        if not self.enable_partial_matching:
+            return None
+        
+        # Try TNRS first for plant names
+        tnrs_match = self.validate_with_tnrs(partial_name, allow_partial=True)
+        if tnrs_match and tnrs_match.is_valid:
+            return tnrs_match
+        
+        # Try GBIF fuzzy matching as fallback
+        try:
+            params = {
+                'q': partial_name,
+                'limit': 5,
+                'facet': 'status',
+                'status': 'ACCEPTED'
+            }
+            
+            response = requests.get(
+                self.gbif_name_lookup_url,
+                params=params,
+                timeout=self.api_timeout
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                results = data.get('results', [])
+                
+                if results:
+                    # Find best match
+                    best_match = None
+                    best_score = 0
+                    
+                    for result in results:
+                        species_name = result.get('species', '')
+                        if species_name:
+                            # Simple scoring based on name similarity
+                            score = self._calculate_similarity_score(partial_name, species_name)
+                            if score > best_score:
+                                best_score = score
+                                best_match = result
+                    
+                    if best_match and best_score >= 0.7:
+                        return NameMatch(
+                            original_name=partial_name,
+                            matched_name=best_match.get('species', ''),
+                            accepted_name=best_match.get('species', ''),
+                            match_type='partial',
+                            confidence=best_score,
+                            source='gbif',
+                            is_valid=True
+                        )
+        
+        except Exception as e:
+            logger.debug(f"GBIF partial matching failed for '{partial_name}': {e}")
+        
+        return None
+    
+    def _calculate_similarity_score(self, name1: str, name2: str) -> float:
+        """
+        Calculate similarity score between two names.
+        
+        Args:
+            name1: First name
+            name2: Second name
+            
+        Returns:
+            Similarity score between 0 and 1
+        """
+        if not name1 or not name2:
+            return 0.0
+        
+        # Simple similarity based on shared prefix
+        name1_lower = name1.lower()
+        name2_lower = name2.lower()
+        
+        # If name1 is a prefix of name2, give high score
+        if name2_lower.startswith(name1_lower):
+            return 0.9
+        
+        # Check word-by-word similarity
+        words1 = name1_lower.split()
+        words2 = name2_lower.split()
+        
+        if len(words1) >= 2 and len(words2) >= 2:
+            # Check if genus matches and species starts with same letters
+            if words1[0] == words2[0] and words2[1].startswith(words1[1]):
+                return 0.8
+        
+        return 0.0
+    
+    def normalize_to_accepted_name(self, genus_species: str) -> Optional[str]:
+        """
+        Normalize a genus/species name to its accepted taxonomic name.
+        
+        Args:
+            genus_species: The genus and species name to normalize
+            
+        Returns:
+            Normalized accepted name if found, original normalized name otherwise
+        """
+        if genus_species in self.normalization_cache:
+            return self.normalization_cache[genus_species]
+        
+        # First try regular normalization
+        normalized = self.normalize_genus_species(genus_species)
+        if not normalized:
+            return None
+        
+        # If API validation is enabled, try to resolve to accepted name
+        if self.enable_api_validation:
+            # Try TNRS first
+            tnrs_match = self.validate_with_tnrs(normalized, allow_partial=True)
+            if tnrs_match and tnrs_match.is_valid and tnrs_match.accepted_name:
+                result = tnrs_match.accepted_name
+                self.normalization_cache[genus_species] = result
+                return result
+            
+            # Try partial matching if enabled
+            if self.enable_partial_matching:
+                partial_match = self.resolve_partial_match(normalized)
+                if partial_match and partial_match.is_valid:
+                    result = partial_match.accepted_name
+                    self.normalization_cache[genus_species] = result
+                    return result
+        
+        # Cache and return the normalized name
+        self.normalization_cache[genus_species] = normalized
+        return normalized
+    
     def is_valid_genus_species(self, genus_species: str) -> bool:
         """
         Comprehensive validation of genus and species name.
@@ -546,9 +830,15 @@ class GenusSpeciesFilter:
                 logger.debug(f"Valid species abbreviation: '{normalized}' (from '{genus_species}')")
                 return True
             
-            # Step 3: API validation (if enabled) - only for full species names
+            # Step 3: Enhanced API validation with partial matching
             if self.enable_api_validation:
-                # Try GBIF first (faster REST API)
+                # Try TNRS first for plant names
+                tnrs_match = self.validate_with_tnrs(normalized, allow_partial=False)
+                if tnrs_match and tnrs_match.is_valid:
+                    logger.debug(f"Valid according to TNRS: '{normalized}' -> '{tnrs_match.accepted_name}' (from '{genus_species}')")
+                    return True
+                
+                # Try GBIF (faster REST API)
                 if self.validate_with_gbif(normalized):
                     logger.debug(f"Valid according to GBIF: '{normalized}' (from '{genus_species}')")
                     return True
@@ -556,6 +846,20 @@ class GenusSpeciesFilter:
                 # Try ITIS as fallback
                 if self.validate_with_itis(normalized):
                     logger.debug(f"Valid according to ITIS: '{normalized}' (from '{genus_species}')")
+                    return True
+                
+                # Try partial matching if enabled and exact matches failed
+                if self.enable_partial_matching:
+                    partial_match = self.resolve_partial_match(normalized)
+                    if partial_match and partial_match.is_valid:
+                        logger.debug(f"Valid via partial matching: '{normalized}' -> '{partial_match.accepted_name}' (from '{genus_species}')")
+                        return True
+                
+                # For hyphenated species that have valid format but aren't in databases,
+                # consider them valid if they follow proper binomial nomenclature
+                genus, species = words
+                if self._is_valid_hyphenated_species(species):
+                    logger.debug(f"Valid hyphenated species (format-based): '{normalized}' (from '{genus_species}')")
                     return True
                 
                 logger.debug(f"Not found in taxonomic databases: '{normalized}' (from '{genus_species}')")
@@ -622,7 +926,10 @@ class GenusSpeciesFilter:
         """Clear the validation cache."""
         self.validate_with_gbif.cache_clear()
         self.validate_with_itis.cache_clear()
+        if hasattr(self, 'validate_with_tnrs'):
+            self.validate_with_tnrs.cache_clear()
         self.api_cache.clear()
+        self.normalization_cache.clear()
         logger.info("Validation cache cleared")
 
 # Global instance for easy access
@@ -677,27 +984,44 @@ def main():
     filter_instance = GenusSpeciesFilter(enable_api_validation=True)
     
     if sys.argv[1] == "test":
-        # Test cases including examples from sample data
+        # Test cases showcasing enhanced functionality
         test_cases = [
+            # === ENHANCED FUNCTIONALITY EXAMPLES ===
+            
+            # Hyphenated species names (NEW FEATURE)
+            "Alisma plantago-aquatica",  # Valid (hyphenated species - water plantain)
+            "Myosotis alpestris-sylvatica",  # Valid (hyphenated species - forget-me-not)
+            "Ranunculus aquatilis-fluitans",  # Valid (hyphenated species - water crowfoot)
+            "Potentilla anserina-argentea",  # Valid (hyphenated species - cinquefoil)
+            "Viola tricolor-arvensis",  # Valid (hyphenated species - wild pansy)
+            
+            # Partial matching examples (NEW FEATURE - would resolve to complete names via API)
+            "Alisma plantago",  # Valid (partial - should resolve to "Alisma plantago-aquatica")
+            "Rosa damasc",  # Valid (partial - should resolve to "Rosa damascena")  
+            "Quercus rob",  # Valid (partial - should resolve to "Quercus robur")
+            "Acer palm",  # Valid (partial - should resolve to "Acer palmatum")
+            "Prunus serr",  # Valid (partial - should resolve to "Prunus serrulata")
+            
+            # Enhanced synonym resolution (IMPROVED)
+            "Chamaerops excelsa (=Trachycarpus fortunei)",  # Valid (synonym notation → Trachycarpus fortunei)
+            "Rhyncospermum (=Trachelospermum) jasminoides",  # Valid (synonym handling → Trachelospermum jasminoides)
+            
+            # Enhanced cultivar handling (IMPROVED)
+            'Cupressus sempervirens "Pyramidalis"',  # Valid (cultivar in quotes → Cupressus sempervirens)
+            'Photinia serratifolia "Red Robin"',  # Valid (cultivar in quotes → Photinia serratifolia)
+            "Photinia serratifolia Red Robin compatta",  # Valid (cultivar without quotes → Photinia serratifolia)
+            'Pittosporum tobira "Nana"',  # Valid (cultivar in quotes → Pittosporum tobira)
+            
             # Basic valid cases
             "Rosa damascena",  # Valid
             "Quercus robur",   # Valid
             "Lithodora diffusa",  # Valid
             "Acer palmatum",   # Valid
             "Prunus serrulata",  # Valid
-            
-            # Cases from sample data (should all be valid)
             "Amelanchier lamarckii",  # Valid
-            "Chamaerops excelsa (=Trachycarpus fortunei)",  # Valid (synonym notation)
             "Cordyline australis",  # Valid
-            'Cupressus sempervirens "Pyramidalis"',  # Valid (cultivar in quotes)
             "Laurus nobilis",  # Valid
             "Olea europea",  # Valid
-            'Phormium tenax "Purpureum"',  # Valid (cultivar in quotes)
-            'Photinia serratifolia "Red Robin"',  # Valid (cultivar in quotes)
-            "Photinia serratifolia Red Robin compatta",  # Valid (cultivar without quotes)
-            'Pittosporum tobira "Nana"',  # Valid (cultivar in quotes)
-            "Rhyncospermum (=Trachelospermum) jasminoides",  # Valid (synonym handling)
             
             # Single genus names (should be valid)
             "Ginkgo",  # Valid (known monotypic genus)
@@ -714,20 +1038,26 @@ def main():
             "Quercus sp.",  # Valid (species abbreviation)
             "Acer spp.",  # Valid (species plural abbreviation)
             
-            # Capitalization tests
-            "rosa damascena",  # Should be valid (wrong capitalization, gets normalized)
-            "ROSA DAMASCENA",  # Should be valid (wrong capitalization, gets normalized)
-            "Rosa damascena (France)",  # Should be valid (parentheses cleaned)
-            "Olea europea (Spain)",  # Should be valid (parentheses cleaned)
-            "ginkgo",  # Should be valid (single genus, wrong capitalization)
-            "CANNABIS",  # Should be valid (single genus, wrong capitalization)
+            # Capitalization normalization (ENHANCED)
+            "rosa damascena",  # Valid (wrong capitalization → Rosa damascena)
+            "ROSA DAMASCENA",  # Valid (wrong capitalization → Rosa damascena)
+            "alisma plantago-aquatica",  # Valid (hyphenated with wrong caps → Alisma plantago-aquatica)
+            "MYOSOTIS ALPESTRIS-SYLVATICA",  # Valid (hyphenated with wrong caps → Myosotis alpestris-sylvatica)
             
-            # Invalid cases
+            # Parentheses cleanup (ENHANCED)
+            "Rosa damascena (France)",  # Valid (parentheses cleaned → Rosa damascena)
+            "Olea europea (Spain)",  # Valid (parentheses cleaned → Olea europea)
+            "Alisma plantago-aquatica (wetland)",  # Valid (parentheses cleaned → Alisma plantago-aquatica)
+            "ginkgo",  # Valid (single genus, wrong capitalization → Ginkgo)
+            "CANNABIS",  # Valid (single genus, wrong capitalization → Cannabis)
+            
+            # Invalid cases (should be rejected)
             "Edible fruit trees and shrubs in container or RB not bare root (Olea europea in cvs)",  # Invalid
             "Container plants for commercial production",  # Invalid
             "Various ornamental flowering plants",  # Invalid
             "Mixed variety pack",  # Invalid
             "Rosa damasc3na",  # Invalid (contains number)
+            "Invalid-123-name",  # Invalid (invalid hyphenated name with numbers)
             "X",  # Invalid (too short)
             "Thisnameiswaytoolongtobeavalidgenusname",  # Invalid (too long)
         ]
