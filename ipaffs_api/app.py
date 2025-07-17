@@ -130,6 +130,47 @@ def filter_exact_genus_species_matches(results, input_genus_species):
     logger.info(f"Filtered EPPO results for '{input_genus_species}': {len(results)} -> {len(exact_matches)} exact matches")
     return exact_matches
 
+def find_intended_users_column(headers):
+    """Find intended users column with flexible matching."""
+    for header in headers:
+        header_lower = header.lower().strip()
+        # Check for exact matches and common variations
+        if (header_lower == 'intended for final users' or
+            header_lower == 'intended for final users (or commercial flower production)' or
+            header_lower == 'intended final users' or
+            header_lower == 'final users' or
+            header_lower == 'intended users' or
+            ('intended' in header_lower and ('final' in header_lower or 'users' in header_lower)) or
+            'commercial flower production' in header_lower):
+            logger.info(f"Found intended users column '{header}' using flexible match")
+            return header
+    logger.info(f"No intended users column found in: {headers}")
+    return None
+
+def find_controlled_atmosphere_column(headers):
+    """Find controlled atmosphere column with flexible matching."""
+    for header in headers:
+        header_lower = header.lower().strip()
+        # Check for exact matches and common variations
+        if (header_lower == 'controlled atmosphere container' or
+            header_lower == 'controlled atmosphere' or
+            ('controlled' in header_lower and 'atmosphere' in header_lower)):
+            logger.info(f"Found controlled atmosphere column '{header}' using flexible match")
+            return header
+    logger.info(f"No controlled atmosphere column found in: {headers}")
+    return None
+
+def find_type_of_package_column(headers):
+    """Find type of package column with flexible matching."""
+    for header in headers:
+        header_lower = header.lower().strip()
+        # Check for exact matches and common variations
+        if (header_lower == 'type of package'):
+            logger.info(f"Found type of package column '{header}' using flexible match")
+            return header
+    logger.info(f"No type of package column found in: {headers}")
+    return None
+
 # Health check endpoint
 @app.route('/api/v1/health', methods=['GET'])
 def health_check():
@@ -469,6 +510,54 @@ def prefill_eppo():
                     updated_row[eppo_col] = eppo_codes[i]
             updated_data_rows.append(updated_row)
         
+        # Find intended users column and prefill with "Yes"
+        intended_col = find_intended_users_column(headers)
+        if intended_col:
+            for i, row in enumerate(updated_data_rows):
+                current_value = row.get(intended_col, '')
+                if not current_value or str(current_value).strip() == '':
+                    row[intended_col] = 'Yes'
+                    logger.debug(f"Pre-filled intended users for row {i}")
+        else:
+            # Create new intended users column if not found
+            intended_col = 'Intended for final users'
+            headers.append(intended_col)
+            for i, row in enumerate(updated_data_rows):
+                row[intended_col] = 'Yes'
+                logger.debug(f"Created and pre-filled intended users for row {i}")
+        
+        # Find controlled atmosphere column and prefill with "No"
+        controlled_col = find_controlled_atmosphere_column(headers)
+        if controlled_col:
+            for i, row in enumerate(updated_data_rows):
+                current_value = row.get(controlled_col, '')
+                if not current_value or str(current_value).strip() == '':
+                    row[controlled_col] = 'No'
+                    logger.debug(f"Pre-filled controlled atmosphere for row {i}")
+        else:
+            # Create new controlled atmosphere column if not found
+            controlled_col = 'Controlled atmosphere container'
+            headers.append(controlled_col)
+            for i, row in enumerate(updated_data_rows):
+                row[controlled_col] = 'No'
+                logger.debug(f"Created and pre-filled controlled atmosphere for row {i}")
+        
+        # Find type of package column and prefill with "PK"
+        package_col = find_type_of_package_column(headers)
+        if package_col:
+            for i, row in enumerate(updated_data_rows):
+                current_value = row.get(package_col, '')
+                if not current_value or str(current_value).strip() == '':
+                    row[package_col] = 'PK'
+                    logger.debug(f"Pre-filled type of package for row {i}")
+        else:
+            # Create new type of package column if not found
+            package_col = 'Type of package'
+            headers.append(package_col)
+            for i, row in enumerate(updated_data_rows):
+                row[package_col] = 'PK'
+                logger.debug(f"Created and pre-filled type of package for row {i}")
+        
         # Create updated CSV data
         updated_csv_data = {
             "headers": headers,
@@ -492,15 +581,35 @@ def prefill_eppo():
         # Sanitize CSV data for response
         sanitized_csv_data = ResponseFormatter.sanitize_csv_data(updated_csv_data)
         
+        # Count prefilled fields
+        eppo_codes_added = len([code for code in eppo_codes if code])
+        prefilled_fields = []
+        
+        if intended_col in headers:
+            prefilled_fields.append("Intended for final users")
+        if controlled_col in headers:
+            prefilled_fields.append("Controlled atmosphere container")
+        if package_col in headers:
+            prefilled_fields.append("Type of package")
+        
+        message_parts = []
+        if eppo_codes_added > 0:
+            message_parts.append(f"Added {eppo_codes_added} EPPO codes")
+        if prefilled_fields:
+            message_parts.append(f"Pre-filled {', '.join(prefilled_fields)}")
+        
+        message = f"IPAFFS pre-fill completed. {'. '.join(message_parts)}." if message_parts else "IPAFFS pre-fill completed."
+        
         response = ResponseFormatter.success_response(
             data={
-                "eppo_codes_added": len([code for code in eppo_codes if code]),
+                "eppo_codes_added": eppo_codes_added,
                 "commodity_options": commodity_options,
-                "is_array_format": len(data_rows) > 1
+                "is_array_format": len(data_rows) > 1,
+                "prefilled_fields": prefilled_fields
             },
             csv_data=sanitized_csv_data,
             session_id=session_id,
-            message=f"EPPO pre-fill completed. Added {len([code for code in eppo_codes if code])} EPPO codes."
+            message=message
         )
         
         return jsonify(response)
