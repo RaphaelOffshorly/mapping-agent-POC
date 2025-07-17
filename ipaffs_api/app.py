@@ -15,6 +15,7 @@ sys.path.append('..')
 from eppo_lookup import EPPOLookup
 from eppo_lookup_optimized import EPPOLookupOptimized
 from utils.commodity_filter import get_commodity_filter
+from utils.genus_species_filter import get_genus_species_filter
 from agents.pdf_extract_agent import PDFExtractAgent
 from agents.csv_edit_supervisor import CSVEditSupervisorAgent
 
@@ -381,9 +382,10 @@ def prefill_eppo():
                 error_code="MISSING_CSV_DATA"
             )
         
-        # Initialize EPPO lookup and commodity filter
+        # Initialize EPPO lookup, commodity filter, and genus species filter
         lookup = get_eppo_lookup_optimized()
         commodity_filter = get_commodity_filter()
+        genus_species_filter = get_genus_species_filter()
         
         headers = csv_data.get('headers', [])
         data_rows = csv_data.get('data', [])
@@ -405,6 +407,43 @@ def prefill_eppo():
         genus_species_data = []
         for row in data_rows:
             genus_species_data.append(row.get(genus_species_col, ''))
+        
+        # Filter and normalize genus/species data, removing invalid rows completely
+        logger.info(f"Filtering and normalizing {len(genus_species_data)} genus/species entries")
+        valid_row_indices = []
+        filtered_genus_species_data = []
+        filtering_stats = {'original_count': len(genus_species_data), 'filtered_count': 0, 'normalized_count': 0, 'removed_count': 0}
+        
+        for i, entry in enumerate(genus_species_data):
+            if not entry or not entry.strip():
+                # Keep empty entries as-is
+                valid_row_indices.append(i)
+                filtered_genus_species_data.append('')
+                continue
+            
+            # Try to normalize the entry
+            normalized = genus_species_filter.normalize_genus_species(entry)
+            if normalized and genus_species_filter.is_valid_genus_species(entry):
+                valid_row_indices.append(i)
+                filtered_genus_species_data.append(normalized)
+                filtering_stats['filtered_count'] += 1
+                if normalized != entry.strip():
+                    filtering_stats['normalized_count'] += 1
+                    logger.debug(f"Normalized genus/species: '{entry}' -> '{normalized}'")
+            else:
+                # Don't include this row index - it will be removed completely
+                filtering_stats['removed_count'] += 1
+                logger.debug(f"Invalid genus/species row will be removed: '{entry}'")
+        
+        logger.info(f"Genus/species filtering complete: {filtering_stats['original_count']} original, "
+                   f"{filtering_stats['filtered_count']} valid, {filtering_stats['normalized_count']} normalized, "
+                   f"{filtering_stats['removed_count']} removed")
+        
+        # Update data_rows to only include valid rows
+        filtered_data_rows = [data_rows[i] for i in valid_row_indices]
+        
+        # Update the genus/species data with filtered results
+        genus_species_data = filtered_genus_species_data
         
         # Filter out empty entries for batch processing
         non_empty_entries = [(i, name) for i, name in enumerate(genus_species_data) if name and name.strip()]
@@ -500,14 +539,21 @@ def prefill_eppo():
             eppo_col = 'EPPO code'
             headers.append(eppo_col)
         
-        # Update rows with EPPO codes
-        for i, row in enumerate(data_rows):
+        # Update rows with EPPO codes and normalized genus/species (using filtered rows only)
+        for i, row in enumerate(filtered_data_rows):
             updated_row = row.copy()
+            
+            # Update genus/species with normalized value
+            if i < len(genus_species_data) and genus_species_data[i]:
+                updated_row[genus_species_col] = genus_species_data[i]
+            
+            # Update EPPO code
             if i < len(eppo_codes) and eppo_codes[i]:
                 # Only update if current value is empty
                 current_value = updated_row.get(eppo_col, '')
                 if not current_value or str(current_value).strip() == '':
                     updated_row[eppo_col] = eppo_codes[i]
+            
             updated_data_rows.append(updated_row)
         
         # Find intended users column and prefill with "Yes"

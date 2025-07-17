@@ -94,6 +94,9 @@ class PDFExtractionService:
             # Convert to CSV format
             csv_data = convert_extracted_data_to_csv(extracted_data)
             
+            # Clear the Variety column if it exists
+            self._clear_variety_column(csv_data)
+            
             # Generate column descriptions from schema
             column_descriptions = {}
             if 'properties' in schema_data:
@@ -157,6 +160,37 @@ class PDFExtractionService:
             return False, "File does not appear to be a valid PDF"
         
         return True, None
+    
+    def _clear_variety_column(self, csv_data: Dict[str, Any]) -> None:
+        """
+        Clear the Variety column from CSV data if it exists.
+        
+        Args:
+            csv_data: CSV data dictionary with headers and rows
+        """
+        try:
+            headers = csv_data.get('headers', [])
+            rows = csv_data.get('rows', [])
+            
+            # Find the Variety column index (case-insensitive)
+            variety_index = None
+            for i, header in enumerate(headers):
+                if header.lower() == 'variety':
+                    variety_index = i
+                    break
+            
+            if variety_index is not None:
+                # Clear all values in the Variety column
+                for row in rows:
+                    if variety_index < len(row):
+                        row[variety_index] = ''
+                
+                logger.info(f"Cleared Variety column at index {variety_index}")
+            else:
+                logger.info("No Variety column found to clear")
+                
+        except Exception as e:
+            logger.warning(f"Error clearing Variety column: {e}")
     
     def get_ipaffs_schema(self) -> Dict[str, Any]:
         """
