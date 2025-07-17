@@ -166,26 +166,26 @@ class PDFExtractionService:
         Clear the Variety column from CSV data if it exists.
         
         Args:
-            csv_data: CSV data dictionary with headers and rows
+            csv_data: CSV data dictionary with headers and data
         """
         try:
             headers = csv_data.get('headers', [])
-            rows = csv_data.get('rows', [])
+            data_rows = csv_data.get('data', [])
             
-            # Find the Variety column index (case-insensitive)
-            variety_index = None
-            for i, header in enumerate(headers):
+            # Find the Variety column (case-insensitive)
+            variety_column = None
+            for header in headers:
                 if header.lower() == 'variety':
-                    variety_index = i
+                    variety_column = header
                     break
             
-            if variety_index is not None:
+            if variety_column is not None:
                 # Clear all values in the Variety column
-                for row in rows:
-                    if variety_index < len(row):
-                        row[variety_index] = ''
+                for row in data_rows:
+                    if isinstance(row, dict) and variety_column in row:
+                        row[variety_column] = ''
                 
-                logger.info(f"Cleared Variety column at index {variety_index}")
+                logger.info(f"Cleared Variety column '{variety_column}' for {len(data_rows)} rows")
             else:
                 logger.info("No Variety column found to clear")
                 
