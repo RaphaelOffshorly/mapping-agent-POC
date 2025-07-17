@@ -107,7 +107,7 @@
                 "type": "null"
               }
             ],
-            "description": ""
+            "description": "This column represents the specific type or classification of wine, grape, or agricultural product being analyzed or sold."
           }
         },
         "required": [

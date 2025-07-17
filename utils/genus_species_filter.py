@@ -45,6 +45,9 @@ class GenusSpeciesFilter:
         - Wrong capitalization (rosa damascena → Rosa damascena)
         - Parentheses with country info (Rosa damascena (France) → Rosa damascena)
         - Taxonomic synonyms (Rhyncospermum (=Trachelospermum) jasminoides → Trachelospermum jasminoides)
+        - Cultivar names in quotes (Rosa damascena "Red Robin" → Rosa damascena)
+        - Cultivar names without quotes (Rosa damascena Red Robin → Rosa damascena)
+        - Synonym notation (Chamaerops excelsa (=Trachycarpus fortunei) → Trachycarpus fortunei)
         
         Args:
             genus_species: The genus and species string to normalize
@@ -68,8 +71,18 @@ class GenusSpeciesFilter:
             old_genus, new_genus, species = synonym_match.groups()
             # Use the synonym genus (the one in parentheses)
             cleaned = f"{new_genus} {species}"
+        else:
+            # Handle other synonym patterns: "Chamaerops excelsa (=Trachycarpus fortunei)"
+            synonym_match2 = re.search(r'(\w+)\s+(\w+)\s*\(=(\w+)\s+(\w+)\)', cleaned)
+            if synonym_match2:
+                old_genus, old_species, new_genus, new_species = synonym_match2.groups()
+                # Use the synonym name (the one in parentheses)
+                cleaned = f"{new_genus} {new_species}"
         
-        # Remove any remaining parentheses and their contents
+        # Remove cultivar names in quotes: "Red Robin", "Pyramidalis", etc.
+        cleaned = re.sub(r'\s*"[^"]*"\s*', ' ', cleaned)
+        
+        # Remove any remaining parentheses and their contents (country info, etc.)
         cleaned = re.sub(r'\s*\([^)]*\)\s*', ' ', cleaned)
         
         # Clean up multiple spaces
@@ -78,11 +91,11 @@ class GenusSpeciesFilter:
         # Split into words
         words = cleaned.split()
         
-        # Must have exactly two words after cleaning
-        if len(words) != 2:
+        # Must have at least two words, take only first two (genus species)
+        if len(words) < 2:
             return None
         
-        genus, species = words
+        genus, species = words[0], words[1]
         
         # Both words must be alphabetic
         if not genus.isalpha() or not species.isalpha():
@@ -430,26 +443,41 @@ def main():
     filter_instance = GenusSpeciesFilter(enable_api_validation=True)
     
     if sys.argv[1] == "test":
-        # Test cases
+        # Test cases including examples from sample data
         test_cases = [
+            # Basic valid cases
             "Rosa damascena",  # Valid
             "Quercus robur",   # Valid
             "Lithodora diffusa",  # Valid
+            "Acer palmatum",   # Valid
+            "Prunus serrulata",  # Valid
+            
+            # Cases from sample data (should all be valid)
+            "Amelanchier lamarckii",  # Valid
+            "Chamaerops excelsa (=Trachycarpus fortunei)",  # Valid (synonym notation)
+            "Cordyline australis",  # Valid
+            'Cupressus sempervirens "Pyramidalis"',  # Valid (cultivar in quotes)
+            "Laurus nobilis",  # Valid
+            "Olea europea",  # Valid
+            'Phormium tenax "Purpureum"',  # Valid (cultivar in quotes)
+            'Photinia serratifolia "Red Robin"',  # Valid (cultivar in quotes)
+            "Photinia serratifolia Red Robin compatta",  # Valid (cultivar without quotes)
+            'Pittosporum tobira "Nana"',  # Valid (cultivar in quotes)
+            "Rhyncospermum (=Trachelospermum) jasminoides",  # Valid (synonym handling)
+            
+            # Capitalization tests
+            "rosa damascena",  # Should be valid (wrong capitalization, gets normalized)
+            "ROSA DAMASCENA",  # Should be valid (wrong capitalization, gets normalized)
+            "Rosa damascena (France)",  # Should be valid (parentheses cleaned)
+            "Olea europea (Spain)",  # Should be valid (parentheses cleaned)
+            
+            # Invalid cases
             "Edible fruit trees and shrubs in container or RB not bare root (Olea europea in cvs)",  # Invalid
             "Container plants for commercial production",  # Invalid
             "Various ornamental flowering plants",  # Invalid
-            "Acer palmatum",   # Valid
-            "Prunus serrulata",  # Valid
             "Mixed variety pack",  # Invalid
-            "rosa damascena",  # Should be valid now (wrong capitalization, gets normalized)
-            "ROSA DAMASCENA",  # Should be valid now (wrong capitalization, gets normalized)
-            "Rosa damascena (France)",  # Should be valid now (parentheses cleaned)
-            "Rhyncospermum (=Trachelospermum) jasminoides",  # Should be valid (synonym handling)
-            "Olea europea (Spain)",  # Should be valid (parentheses cleaned)
             "Rosa",  # Invalid (only one word)
-            "Rosa damascena alba",  # Invalid (three words)
             "Rosa damasc3na",  # Invalid (contains number)
-            "Mixed variety pack",  # Invalid (product description)
         ]
         
         print("Testing genus/species validation:")
