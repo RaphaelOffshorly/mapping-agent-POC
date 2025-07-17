@@ -86,6 +86,50 @@ def get_eppo_lookup_optimized():
             return get_eppo_lookup()
     return eppo_lookup_optimized_instance
 
+def filter_exact_genus_species_matches(results, input_genus_species):
+    """
+    Filter EPPO lookup results to only include exact matches for the input genus/species.
+    
+    Args:
+        results: List of tuples from EPPO lookup (commodity_name, eppo_code, commodity_code, description)
+        input_genus_species: The original input genus/species string
+        
+    Returns:
+        Filtered list of tuples with only exact matches
+    """
+    if not results or not input_genus_species:
+        return results
+    
+    # Normalize the input for comparison
+    input_normalized = input_genus_species.strip().lower()
+    
+    # Remove common variations that might cause mismatches
+    input_normalized = input_normalized.replace('_', ' ')
+    input_normalized = ' '.join(input_normalized.split())  # Remove extra spaces
+    
+    exact_matches = []
+    
+    for result in results:
+        if len(result) >= 4:
+            commodity_name = result[0]
+            
+            # Normalize commodity name for comparison
+            commodity_normalized = commodity_name.strip().lower()
+            commodity_normalized = commodity_normalized.replace('_', ' ')
+            commodity_normalized = ' '.join(commodity_normalized.split())
+            
+            # Check for exact match or very close match
+            if (commodity_normalized == input_normalized or 
+                commodity_normalized.startswith(input_normalized) or
+                input_normalized in commodity_normalized):
+                exact_matches.append(result)
+                logger.debug(f"Exact match found: '{commodity_name}' matches '{input_genus_species}'")
+            else:
+                logger.debug(f"Filtered out: '{commodity_name}' does not match '{input_genus_species}'")
+    
+    logger.info(f"Filtered EPPO results for '{input_genus_species}': {len(results)} -> {len(exact_matches)} exact matches")
+    return exact_matches
+
 # Health check endpoint
 @app.route('/api/v1/health', methods=['GET'])
 def health_check():
@@ -346,8 +390,11 @@ def prefill_eppo():
                         if eppo_code:
                             eppo_codes[original_index] = eppo_code
                             
+                            # Filter results to only include exact matches for the input genus/species
+                            exact_matches = filter_exact_genus_species_matches(results, genus_species)
+                            
                             # Filter results for valid commodity codes
-                            filtered_results = commodity_filter.filter_eppo_results(results)
+                            filtered_results = commodity_filter.filter_eppo_results(exact_matches)
                             
                             options = []
                             if filtered_results:
@@ -360,7 +407,7 @@ def prefill_eppo():
                             
                             commodity_options[original_index] = options
                             
-                            logger.info(f"Found EPPO code '{eppo_code}' for '{genus_species}' with {len(options)} commodity options")
+                            logger.info(f"Found EPPO code '{eppo_code}' for '{genus_species}' with {len(options)} commodity options (filtered to exact matches)")
                         else:
                             logger.info(f"No EPPO code found for '{genus_species}'")
                     else:
@@ -379,7 +426,10 @@ def prefill_eppo():
                         if eppo_code:
                             eppo_codes[i] = eppo_code
                             
-                            filtered_results = commodity_filter.filter_eppo_results(results)
+                            # Filter results to only include exact matches for the input genus/species
+                            exact_matches = filter_exact_genus_species_matches(results, genus_species)
+                            
+                            filtered_results = commodity_filter.filter_eppo_results(exact_matches)
                             
                             options = []
                             if filtered_results:
